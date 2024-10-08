@@ -35,7 +35,7 @@ import java.util.function.Function;
  *
  * @param <T> the future result type of an asynchronous operation for this type.
  * @param <U> the future result type of an asynchronous operation for the {@link FutureCallback}.
- * @since 5.5
+ * @since 5.4
  */
 public class CompletingFutureContribution<T, U> extends FutureContribution<T> {
 

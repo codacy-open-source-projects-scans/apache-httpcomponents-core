@@ -41,7 +41,6 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.hc.core5.annotation.Contract;
 import org.apache.hc.core5.annotation.ThreadingBehavior;
-import org.apache.hc.core5.http.message.BasicHeaderValueFormatter;
 import org.apache.hc.core5.http.message.BasicNameValuePair;
 import org.apache.hc.core5.http.message.MessageSupport;
 import org.apache.hc.core5.http.message.ParserCursor;
@@ -68,125 +67,105 @@ public final class ContentType implements Serializable {
      */
     private static final String CHARSET = "charset";
 
-    /**
-     * Flag indicating whether the charset is implicit.
-     * <p>
-     * When {@code implicitCharset} is {@code true}, the charset will not be explicitly
-     * included in the string representation of this {@link ContentType} (i.e., in the {@code toString} method),
-     * unless it is required for the given MIME type.
-     * If {@code implicitCharset} is {@code false}, the charset will always be included in the string representation,
-     * unless the MIME type explicitly disallows charset parameters (e.g., certain binary or multipart types).
-     * </p>
-     * <p>
-     * This flag is essential for proper handling of content types where the charset is either implied by the specification
-     * (e.g., JSON is always UTF-8) or where including a charset is not meaningful (e.g., binary types like
-     * {@code application/octet-stream}).
-     * </p>
-     *
-     * @since 5.5
-     */
-    private final boolean implicitCharset;
-
-
     // constants
     public static final ContentType APPLICATION_ATOM_XML = create(
-            "application/atom+xml", StandardCharsets.UTF_8, false);
+            "application/atom+xml", StandardCharsets.UTF_8);
     public static final ContentType APPLICATION_FORM_URLENCODED = create(
-            "application/x-www-form-urlencoded", StandardCharsets.ISO_8859_1, true);
+            "application/x-www-form-urlencoded", StandardCharsets.ISO_8859_1);
     public static final ContentType APPLICATION_JSON = create(
-            "application/json", StandardCharsets.UTF_8, true);
+            "application/json", StandardCharsets.UTF_8);
 
     /**
      * Public constant media type for {@code application/x-ndjson}.
      * @since 5.1
      */
     public static final ContentType APPLICATION_NDJSON = create(
-            "application/x-ndjson", StandardCharsets.UTF_8, true);
+            "application/x-ndjson", StandardCharsets.UTF_8);
 
     public static final ContentType APPLICATION_OCTET_STREAM = create(
-            "application/octet-stream", (Charset) null, true);
+            "application/octet-stream", (Charset) null);
     /**
      * Public constant media type for {@code application/pdf}.
      * @since 5.1
      */
     public static final ContentType APPLICATION_PDF = create(
-            "application/pdf", (Charset) null, true);
+            "application/pdf", StandardCharsets.UTF_8);
 
     public static final ContentType APPLICATION_SOAP_XML = create(
-            "application/soap+xml", StandardCharsets.UTF_8, false);
+            "application/soap+xml", StandardCharsets.UTF_8);
     public static final ContentType APPLICATION_SVG_XML = create(
-            "application/svg+xml", StandardCharsets.UTF_8, false);
+            "application/svg+xml", StandardCharsets.UTF_8);
     public static final ContentType APPLICATION_XHTML_XML = create(
-            "application/xhtml+xml", StandardCharsets.UTF_8, false);
+            "application/xhtml+xml", StandardCharsets.UTF_8);
     public static final ContentType APPLICATION_XML = create(
-            "application/xml", StandardCharsets.UTF_8, false);
+            "application/xml", StandardCharsets.UTF_8);
     /**
      * Public constant media type for {@code application/problem+json}.
      * @see <a href="https://tools.ietf.org/html/rfc7807#section-6.1">Problem Details for HTTP APIs, 6.1. application/problem+json</a>
      * @since 5.1
      */
     public static final ContentType APPLICATION_PROBLEM_JSON = create(
-            "application/problem+json", StandardCharsets.UTF_8, true);
+            "application/problem+json", StandardCharsets.UTF_8);
     /**
      * Public constant media type for {@code application/problem+xml}.
      * @see <a href="https://tools.ietf.org/html/rfc7807#section-6.2">Problem Details for HTTP APIs, 6.2. application/problem+xml</a>
      * @since 5.1
      */
     public static final ContentType APPLICATION_PROBLEM_XML = create(
-            "application/problem+xml", StandardCharsets.UTF_8, false);
+            "application/problem+xml", StandardCharsets.UTF_8);
 
     /**
      * Public constant media type for {@code application/rss+xml}.
      * @since 5.1
      */
     public static final ContentType APPLICATION_RSS_XML = create(
-            "application/rss+xml", StandardCharsets.UTF_8, false);
+            "application/rss+xml", StandardCharsets.UTF_8);
 
     public static final ContentType IMAGE_BMP = create(
-            "image/bmp", (Charset) null, true);
+            "image/bmp");
     public static final ContentType IMAGE_GIF = create(
-            "image/gif", (Charset) null, true);
+            "image/gif");
     public static final ContentType IMAGE_JPEG = create(
-            "image/jpeg", (Charset) null, true);
+            "image/jpeg");
     public static final ContentType IMAGE_PNG = create(
-            "image/png", (Charset) null, true);
+            "image/png");
     public static final ContentType IMAGE_SVG = create(
-            "image/svg+xml", (Charset) null, false);
+            "image/svg+xml");
     public static final ContentType IMAGE_TIFF = create(
-            "image/tiff", (Charset) null, true);
+            "image/tiff");
     public static final ContentType IMAGE_WEBP = create(
-            "image/webp", (Charset) null, true);
+            "image/webp");
     public static final ContentType MULTIPART_FORM_DATA = create(
-            "multipart/form-data", StandardCharsets.ISO_8859_1, true);
+            "multipart/form-data", StandardCharsets.ISO_8859_1);
 
     /**
      * Public constant media type for {@code multipart/mixed}.
      * @since 5.1
      */
     public static final ContentType MULTIPART_MIXED = create(
-            "multipart/mixed", StandardCharsets.ISO_8859_1, true);
+            "multipart/mixed", StandardCharsets.ISO_8859_1);
 
     /**
      * Public constant media type for {@code multipart/related}.
      * @since 5.1
      */
     public static final ContentType MULTIPART_RELATED = create(
-            "multipart/related", StandardCharsets.ISO_8859_1, true);
+            "multipart/related", StandardCharsets.ISO_8859_1);
 
     public static final ContentType TEXT_HTML = create(
-            "text/html", StandardCharsets.UTF_8, true);
+            "text/html", StandardCharsets.UTF_8);
 
     /**
      * Public constant media type for {@code text/markdown}.
      * @since 5.1
      */
     public static final ContentType TEXT_MARKDOWN = create(
-            "text/markdown", StandardCharsets.UTF_8, false);
+            "text/markdown", StandardCharsets.UTF_8);
 
     public static final ContentType TEXT_PLAIN = create(
-            "text/plain", StandardCharsets.UTF_8, false);
+            "text/plain", StandardCharsets.UTF_8);
     public static final ContentType TEXT_XML = create(
-            "text/xml", StandardCharsets.UTF_8, false);
+            "text/xml", StandardCharsets.UTF_8);
     /**
      * Public constant media type for {@code text/event-stream}.
      * @see <a href="https://www.w3.org/TR/eventsource/">Server-Sent Events W3C recommendation</a>
@@ -196,7 +175,7 @@ public final class ContentType implements Serializable {
             "text/event-stream", StandardCharsets.UTF_8);
 
     public static final ContentType WILDCARD = create(
-            "*/*", (Charset) null, true);
+            "*/*", (Charset) null);
 
     /**
      * An empty immutable {@code NameValuePair} array.
@@ -246,42 +225,18 @@ public final class ContentType implements Serializable {
     ContentType(
             final String mimeType,
             final Charset charset) {
-        this (mimeType,charset,null, false);
+        this.mimeType = mimeType;
+        this.charset = charset;
+        this.params = null;
     }
 
     ContentType(
             final String mimeType,
             final Charset charset,
             final NameValuePair[] params) {
-
-        this (mimeType,charset,params, false);
-    }
-
-    /**
-     * Constructs a new instance of {@link ContentType} with the given MIME type, charset, parameters,
-     * and an implicit charset flag.
-     * <p>
-     * If {@code implicitCharset} is set to {@code true}, the charset will not be explicitly
-     * included in the string representation of this content type (i.e., the {@code toString} method)
-     * unless it is required for the given MIME type.
-     * If {@code implicitCharset} is {@code false}, the charset will always be included in the
-     * string representation unless the MIME type is one of those that should not include a charset.
-     * </p>
-     *
-     * @param mimeType        the MIME type. It must not be {@code null} or empty and must not contain
-     *                        reserved characters such as {@code <">, <;>, <,>}.
-     * @param charset         the character set for this content type. This can be {@code null}.
-     * @param params          optional parameters for this content type. If {@code null}, no additional
-     *                        parameters will be included.
-     * @param implicitCharset whether the charset is implicit. If {@code true}, the charset is not
-     *                        included in the {@code toString} output unless required.
-     * @since 5.5
-     */
-    ContentType(final String mimeType, final Charset charset, final NameValuePair[] params, final boolean implicitCharset) {
         this.mimeType = mimeType;
         this.charset = charset;
-        this.implicitCharset = implicitCharset;
-        this.params = params != null ? params.clone() : null;
+        this.params = params;
     }
 
     public String getMimeType() {
@@ -333,21 +288,8 @@ public final class ContentType implements Serializable {
         buf.append(this.mimeType);
         if (this.params != null) {
             buf.append("; ");
-            boolean first = true;
-            for (int i = 0; i < params.length; i++) {
-                final NameValuePair param = params[i];
-                if (!first) {
-                    buf.append("; ");
-                }
-                if (param.getName().equalsIgnoreCase("charset") && implicitCharset) {
-                    continue;
-                }
-                BasicHeaderValueFormatter.INSTANCE.formatNameValuePair(buf, param, false);
-                first = false;
-            }
-
-        } else if (this.charset != null && !implicitCharset) {
-            // Append charset only if it's not one of the types that shouldn't have charset
+            MessageSupport.formatParameters(buf, this.params);
+        } else if (this.charset != null) {
             buf.append("; charset=");
             buf.append(this.charset.name());
         }
@@ -364,58 +306,6 @@ public final class ContentType implements Serializable {
         return true;
     }
 
-
-    /**
-     * Creates a new instance of {@link ContentType} with the given MIME type, charset,
-     * and an implicit charset flag.
-     * <p>
-     * This method allows specifying whether the charset should be implicit or explicit.
-     * If {@code implicitCharset} is set to {@code true}, the charset will not be explicitly
-     * included in the string representation of this content type (i.e., the {@code toString} method),
-     * unless it is required for the given MIME type. If {@code implicitCharset} is {@code false},
-     * the charset will always be included unless the MIME type does not allow a charset.
-     * </p>
-     *
-     * @param mimeType        the MIME type. It must not be {@code null} or empty and must not contain
-     *                        reserved characters such as {@code <">, <;>, <,>}.
-     * @param charset         the character set for this content type. This can be {@code null}.
-     * @param implicitCharset whether the charset is implicit. If {@code true}, the charset is
-     *                        not included in the {@code toString} output unless required.
-     * @return a new instance of {@link ContentType}.
-     * @throws IllegalArgumentException if the MIME type is invalid or contains reserved characters.
-     * @since 5.5
-     */
-    public static ContentType create(final String mimeType, final Charset charset, final boolean implicitCharset) {
-        final String normalizedMimeType = TextUtils.toLowerCase(Args.notBlank(mimeType, "MIME type"));
-        Args.check(valid(normalizedMimeType), "MIME type may not contain reserved characters");
-        return new ContentType(normalizedMimeType, charset, null, implicitCharset);
-    }
-
-    /**
-     * Creates a new instance of {@link ContentType} with the given MIME type, parameters,
-     * and an implicit charset flag.
-     * <p>
-     * This method allows specifying additional parameters for the content type and whether
-     * the charset should be implicit or explicit. If {@code implicitCharset} is {@code true},
-     * the charset will not be included in the string representation unless required.
-     * </p>
-     *
-     * @param mimeType        the MIME type. It must not be {@code null} or empty and must not contain
-     *                        reserved characters such as {@code <">, <;>, <,>}.
-     * @param implicitCharset whether the charset is implicit. If {@code true}, the charset is
-     *                        not included in the {@code toString} output unless required.
-     * @param params          optional parameters for the content type. Can be {@code null}.
-     * @return a new instance of {@link ContentType}.
-     * @throws IllegalArgumentException    if the MIME type is invalid or contains reserved characters.
-     * @throws UnsupportedCharsetException if the charset provided in the parameters is not supported.
-     * @since 5.5
-     */
-    public static ContentType create(final String mimeType, final boolean implicitCharset, final NameValuePair... params) throws UnsupportedCharsetException {
-        final String type = TextUtils.toLowerCase(Args.notBlank(mimeType, "MIME type"));
-        Args.check(valid(type), "MIME type may not contain reserved characters");
-        return create(mimeType, params != null ? params.clone() : null, implicitCharset);
-    }
-
     /**
      * Creates a new instance of {@link ContentType}.
      *
@@ -425,7 +315,9 @@ public final class ContentType implements Serializable {
      * @return content type
      */
     public static ContentType create(final String mimeType, final Charset charset) {
-       return create(mimeType, charset, false);
+        final String normalizedMimeType = TextUtils.toLowerCase(Args.notBlank(mimeType, "MIME type"));
+        Args.check(valid(normalizedMimeType), "MIME type may not contain reserved characters");
+        return new ContentType(normalizedMimeType, charset);
     }
 
     /**
@@ -464,10 +356,6 @@ public final class ContentType implements Serializable {
     }
 
     private static ContentType create(final String mimeType, final NameValuePair[] params, final boolean strict) {
-        return create(mimeType, params != null ? params.clone() : null, strict, false);
-    }
-
-    private static ContentType create(final String mimeType, final NameValuePair[] params, final boolean strict, final boolean implicitCharset) {
         Charset charset = null;
         if (params != null) {
             for (final NameValuePair param : params) {
@@ -486,7 +374,7 @@ public final class ContentType implements Serializable {
                 }
             }
         }
-        return new ContentType(mimeType, charset, params != null && params.length > 0 ? params : null, implicitCharset);
+        return new ContentType(mimeType, charset, params != null && params.length > 0 ? params : null);
     }
 
     /**
@@ -629,7 +517,7 @@ public final class ContentType implements Serializable {
         for (final Map.Entry<String, String> entry: paramMap.entrySet()) {
             newParams.add(new BasicNameValuePair(entry.getKey(), entry.getValue()));
         }
-        return create(this.getMimeType(), newParams.toArray(EMPTY_NAME_VALUE_PAIR_ARRAY), true, this.implicitCharset);
+        return create(this.getMimeType(), newParams.toArray(EMPTY_NAME_VALUE_PAIR_ARRAY), true);
     }
 
     public boolean isSameMimeType(final ContentType contentType) {
