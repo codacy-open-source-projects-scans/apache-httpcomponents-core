@@ -28,26 +28,32 @@
 package org.apache.hc.core5.testing.compatibility.http2;
 
 import org.apache.hc.core5.http.HttpHost;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
+import org.apache.hc.core5.http2.impl.nio.bootstrap.H2RequesterBootstrap;
+import org.apache.hc.core5.testing.compatibility.ContainerImages;
+import org.junit.jupiter.api.AfterAll;
+import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
 
-class HttpBinIT {
-    private H2CompatibilityTest h2CompatibilityTest;
+@Testcontainers(disabledWithoutDocker = true)
+class ApacheHttpDCompatIT extends AbstractHttp2CompatIT {
 
-    @BeforeEach
-    void start() throws Exception {
-        h2CompatibilityTest = new H2CompatibilityTest();
-        h2CompatibilityTest.start();
+    @Container
+    static final GenericContainer<?> CONTAINER = ContainerImages.apacheHttpD();
+
+    @Override
+    void configure(final H2RequesterBootstrap bootstrap) {
     }
 
-    @AfterEach
-    void shutdown() throws Exception {
-        h2CompatibilityTest.shutdown();
+    HttpHost targetHost() {
+        return new HttpHost("http",
+                CONTAINER.getHost(),
+                CONTAINER.getMappedPort(ContainerImages.HTTP_PORT));
     }
 
-    @Test
-    void executeHttpBin() throws Exception {
-        h2CompatibilityTest.executeHttpBin(new HttpHost("http", "localhost", 8082));
+    @AfterAll
+    static void cleanup() {
+        CONTAINER.close();
     }
+
 }
