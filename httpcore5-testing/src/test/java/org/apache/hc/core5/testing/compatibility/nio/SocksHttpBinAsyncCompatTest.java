@@ -25,35 +25,25 @@
  *
  */
 
-package org.apache.hc.core5.testing.compatibility.http2;
+package org.apache.hc.core5.testing.compatibility.nio;
+
+import java.net.SocketAddress;
 
 import org.apache.hc.core5.http.HttpHost;
-import org.apache.hc.core5.http2.impl.nio.bootstrap.H2RequesterBootstrap;
-import org.apache.hc.core5.testing.compatibility.ContainerImages;
-import org.junit.jupiter.api.AfterAll;
-import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
+import org.apache.hc.core5.reactor.IOReactorConfig;
 
-@Testcontainers(disabledWithoutDocker = true)
-class NginxCompatIT extends AbstractHttp2CompatIT {
+public abstract class SocksHttpBinAsyncCompatTest extends HttpBinAsyncCompatTest {
 
-    @Container
-    static final GenericContainer<?> CONTAINER = ContainerImages.ngnix();
-
-    @Override
-    void configure(final H2RequesterBootstrap bootstrap) {
-    }
-
-    HttpHost targetHost() {
-        return new HttpHost("http",
-                CONTAINER.getHost(),
-                CONTAINER.getMappedPort(ContainerImages.HTTP_PORT));
-    }
-
-    @AfterAll
-    static void cleanup() {
-        CONTAINER.close();
+    public SocksHttpBinAsyncCompatTest(final HttpHost target, final SocketAddress socksProxy, final String socksUser, final String socksPassword) {
+        super(target);
+        configure(bootstrap -> bootstrap
+                .setIOReactorConfig(IOReactorConfig.custom()
+                        .setSoTimeout(TIMEOUT)
+                        .setSocksProxyAddress(socksProxy)
+                        .setSocksProxyUsername(socksUser)
+                        .setSocksProxyPassword(socksPassword)
+                        .build())
+        );
     }
 
 }
