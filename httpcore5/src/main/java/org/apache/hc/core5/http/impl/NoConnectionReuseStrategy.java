@@ -24,19 +24,28 @@
  * <http://www.apache.org/>.
  *
  */
-package org.apache.hc.core5.annotation;
 
-import java.lang.annotation.Documented;
-import java.lang.annotation.ElementType;
-import java.lang.annotation.Retention;
-import java.lang.annotation.RetentionPolicy;
-import java.lang.annotation.Target;
+package org.apache.hc.core5.http.impl;
+
+import org.apache.hc.core5.annotation.Contract;
+import org.apache.hc.core5.annotation.ThreadingBehavior;
+import org.apache.hc.core5.http.ConnectionReuseStrategy;
+import org.apache.hc.core5.http.HttpRequest;
+import org.apache.hc.core5.http.HttpResponse;
+import org.apache.hc.core5.http.protocol.HttpContext;
 
 /**
- * The field or method to which this annotation is applied is marked as experimental.
+ * A strategy that never reuses a connection.
+ * @since 5.4
  */
-@Documented
-@Target({ElementType.METHOD, ElementType.TYPE, ElementType.FIELD})
-@Retention(RetentionPolicy.CLASS)
-public @interface Experimental {
+@Contract(threading = ThreadingBehavior.IMMUTABLE)
+public class NoConnectionReuseStrategy implements ConnectionReuseStrategy {
+
+    public static final NoConnectionReuseStrategy INSTANCE = new NoConnectionReuseStrategy();
+
+    @Override
+    public boolean keepAlive(final HttpRequest request, final HttpResponse response, final HttpContext context) {
+        return false;
+    }
+
 }
