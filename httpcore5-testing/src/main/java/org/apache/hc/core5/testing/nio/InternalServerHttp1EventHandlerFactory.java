@@ -31,6 +31,7 @@ import javax.net.ssl.SSLContext;
 
 import org.apache.hc.core5.annotation.Contract;
 import org.apache.hc.core5.annotation.ThreadingBehavior;
+import org.apache.hc.core5.function.Callback;
 import org.apache.hc.core5.http.ConnectionReuseStrategy;
 import org.apache.hc.core5.http.ContentLengthStrategy;
 import org.apache.hc.core5.http.HttpRequest;
@@ -82,6 +83,8 @@ class InternalServerHttp1EventHandlerFactory implements IOEventHandlerFactory {
             final Http1Config http1Config,
             final CharCodingConfig charCodingConfig,
             final ConnectionReuseStrategy connectionReuseStrategy,
+            final NHttpMessageParserFactory<HttpRequest> requestParserFactory,
+            final NHttpMessageWriterFactory<HttpResponse> responseWriterFactory,
             final SSLContext sslContext,
             final SSLSessionInitializer sslSessionInitializer,
             final SSLSessionVerifier sslSessionVerifier) {
@@ -94,8 +97,8 @@ class InternalServerHttp1EventHandlerFactory implements IOEventHandlerFactory {
         this.sslContext = sslContext;
         this.sslSessionInitializer = sslSessionInitializer;
         this.sslSessionVerifier = sslSessionVerifier;
-        this.requestParserFactory = new DefaultHttpRequestParserFactory(this.http1Config);
-        this.responseWriterFactory = new DefaultHttpResponseWriterFactory(this.http1Config);
+        this.requestParserFactory = requestParserFactory != null ? requestParserFactory : new DefaultHttpRequestParserFactory(this.http1Config);
+        this.responseWriterFactory = responseWriterFactory != null ? responseWriterFactory : new DefaultHttpResponseWriterFactory(this.http1Config);
     }
 
     protected ServerHttp1StreamDuplexer createServerHttp1StreamDuplexer(
@@ -109,11 +112,12 @@ class InternalServerHttp1EventHandlerFactory implements IOEventHandlerFactory {
             final NHttpMessageWriter<HttpResponse> outgoingMessageWriter,
             final ContentLengthStrategy incomingContentStrategy,
             final ContentLengthStrategy outgoingContentStrategy,
-            final Http1StreamListener streamListener) {
+            final Http1StreamListener streamListener,
+            final Callback<Exception> exceptionCallback) {
         return new ServerHttp1StreamDuplexer(ioSession, httpProcessor, exchangeHandlerFactory,
                 sslContext != null ? URIScheme.HTTPS.id : URIScheme.HTTP.id, http1Config,
                 charCodingConfig, connectionReuseStrategy, incomingMessageParser, outgoingMessageWriter,
-                incomingContentStrategy, outgoingContentStrategy, streamListener);
+                incomingContentStrategy, outgoingContentStrategy, streamListener, exceptionCallback);
     }
 
     @Override
@@ -132,7 +136,8 @@ class InternalServerHttp1EventHandlerFactory implements IOEventHandlerFactory {
                 responseWriterFactory.create(),
                 DefaultContentLengthStrategy.INSTANCE,
                 DefaultContentLengthStrategy.INSTANCE,
-                LoggingHttp1StreamListener.INSTANCE_SERVER);
+                LoggingHttp1StreamListener.INSTANCE_SERVER,
+                LoggingExceptionCallback.INSTANCE);
         return new ServerHttp1IOEventHandler(streamDuplexer);
     }
 

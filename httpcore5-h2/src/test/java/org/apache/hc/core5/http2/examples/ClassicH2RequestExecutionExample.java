@@ -26,38 +26,46 @@
  */
 package org.apache.hc.core5.http2.examples;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Future;
 
-import org.apache.hc.core5.concurrent.FutureCallback;
+import org.apache.hc.core5.annotation.Experimental;
+import org.apache.hc.core5.http.ClassicHttpRequest;
+import org.apache.hc.core5.http.ClassicHttpResponse;
+import org.apache.hc.core5.http.ContentType;
 import org.apache.hc.core5.http.Header;
 import org.apache.hc.core5.http.HttpConnection;
+import org.apache.hc.core5.http.HttpEntity;
 import org.apache.hc.core5.http.HttpHost;
-import org.apache.hc.core5.http.HttpResponse;
-import org.apache.hc.core5.http.Message;
 import org.apache.hc.core5.http.impl.bootstrap.HttpAsyncRequester;
+import org.apache.hc.core5.http.io.support.ClassicRequestBuilder;
 import org.apache.hc.core5.http.nio.AsyncClientEndpoint;
-import org.apache.hc.core5.http.nio.entity.StringAsyncEntityConsumer;
-import org.apache.hc.core5.http.nio.support.AsyncRequestBuilder;
-import org.apache.hc.core5.http.nio.support.BasicResponseConsumer;
+import org.apache.hc.core5.http.nio.support.classic.ClassicToAsyncRequestProducer;
+import org.apache.hc.core5.http.nio.support.classic.ClassicToAsyncResponseConsumer;
+import org.apache.hc.core5.http2.HttpVersionPolicy;
 import org.apache.hc.core5.http2.config.H2Config;
 import org.apache.hc.core5.http2.frame.RawFrame;
 import org.apache.hc.core5.http2.impl.nio.H2StreamListener;
 import org.apache.hc.core5.http2.impl.nio.bootstrap.H2RequesterBootstrap;
-import org.apache.hc.core5.http2.ssl.H2ClientTlsStrategy;
 import org.apache.hc.core5.io.CloseMode;
-import org.apache.hc.core5.ssl.SSLContexts;
 import org.apache.hc.core5.util.Timeout;
 
 /**
- * This example demonstrates how to execute HTTP/2 requests over TLS connections.
- * <p>
- * It requires Java runtime with ALPN protocol support (such as Oracle JRE 9 or newer).
+ * Example of HTTP/2 request execution with a classic I/O API compatibility bridge
+ * that enables the use of standard {@link java.io.InputStream} / {@link java.io.OutputStream}
+ * based data consumers / producers.
+ * <p>>
+ * Execution of individual message exchanges is performed at the current thread.
  */
-public class H2TlsAlpnRequestExecutionExample {
+@Experimental
+public class ClassicH2RequestExecutionExample {
 
     public static void main(final String[] args) throws Exception {
+
         // Create and start requester
         final H2Config h2Config = H2Config.custom()
                 .setPushEnabled(false)
@@ -65,14 +73,7 @@ public class H2TlsAlpnRequestExecutionExample {
 
         final HttpAsyncRequester requester = H2RequesterBootstrap.bootstrap()
                 .setH2Config(h2Config)
-                .setTlsStrategy(new H2ClientTlsStrategy(SSLContexts.createSystemDefault(), (endpoint, sslEngine) -> {
-                    // IMPORTANT uncomment the following line when running Java 9 or older
-                    // in order to avoid the illegal reflective access operation warning
-                    // ====
-                    // return new TlsDetails(sslEngine.getSession(), sslEngine.getApplicationProtocol());
-                    // ====
-                    return null;
-                }))
+                .setVersionPolicy(HttpVersionPolicy.FORCE_HTTP_2)
                 .setStreamListener(new H2StreamListener() {
 
                     @Override
@@ -113,49 +114,40 @@ public class H2TlsAlpnRequestExecutionExample {
         }));
         requester.start();
 
-        final HttpHost target = new HttpHost("https", "nghttp2.org", 443);
+        final HttpHost target = new HttpHost("nghttp2.org");
+        final Future<AsyncClientEndpoint> future = requester.connect(target, Timeout.ofDays(5));
+        final AsyncClientEndpoint clientEndpoint = future.get();
+
         final String[] requestUris = new String[] {"/httpbin/ip", "/httpbin/user-agent", "/httpbin/headers"};
 
-        final CountDownLatch latch = new CountDownLatch(requestUris.length);
         for (final String requestUri: requestUris) {
-            final Future<AsyncClientEndpoint> future = requester.connect(target, Timeout.ofSeconds(5));
-            final AsyncClientEndpoint clientEndpoint = future.get();
-            clientEndpoint.execute(
-                    AsyncRequestBuilder.get()
-                            .setHttpHost(target)
-                            .setPath(requestUri)
-                            .build(),
-                    new BasicResponseConsumer<>(new StringAsyncEntityConsumer()),
-                    new FutureCallback<Message<HttpResponse, String>>() {
+            final ClassicHttpRequest request = ClassicRequestBuilder.get()
+                    .setHttpHost(target)
+                    .setPath(requestUri)
+                    .build();
 
-                        @Override
-                        public void completed(final Message<HttpResponse, String> message) {
-                            clientEndpoint.releaseAndReuse();
-                            final HttpResponse response = message.getHead();
-                            final String body = message.getBody();
-                            System.out.println(requestUri + "->" + response.getCode() + " " + response.getVersion());
-                            System.out.println(body);
-                            latch.countDown();
+            final ClassicToAsyncRequestProducer requestProducer = new ClassicToAsyncRequestProducer(request, Timeout.ofMinutes(5));
+            final ClassicToAsyncResponseConsumer responseConsumer = new ClassicToAsyncResponseConsumer(Timeout.ofMinutes(5));
+
+            clientEndpoint.execute(requestProducer, responseConsumer, null);
+
+            requestProducer.blockWaiting().execute();
+            try (ClassicHttpResponse response = responseConsumer.blockWaiting()) {
+                System.out.println(requestUri + " -> " + response.getCode());
+                final HttpEntity entity = response.getEntity();
+                if (entity != null) {
+                    final ContentType contentType = ContentType.parse(entity.getContentType());
+                    final Charset charset = ContentType.getCharset(contentType, StandardCharsets.UTF_8);
+                    try (final BufferedReader reader = new BufferedReader(new InputStreamReader(entity.getContent(), charset))) {
+                        String line;
+                        while ((line = reader.readLine()) != null) {
+                            System.out.println(line);
                         }
-
-                        @Override
-                        public void failed(final Exception ex) {
-                            clientEndpoint.releaseAndDiscard();
-                            System.out.println(requestUri + "->" + ex);
-                            latch.countDown();
-                        }
-
-                        @Override
-                        public void cancelled() {
-                            clientEndpoint.releaseAndDiscard();
-                            System.out.println(requestUri + " cancelled");
-                            latch.countDown();
-                        }
-
-                    });
+                    }
+                }
+            }
         }
 
-        latch.await();
         System.out.println("Shutting down I/O reactor");
         requester.initiateShutdown();
     }

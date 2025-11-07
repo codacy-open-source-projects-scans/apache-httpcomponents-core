@@ -36,6 +36,7 @@ import java.nio.channels.WritableByteChannel;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 
 import javax.net.ssl.SSLHandshakeException;
 import javax.net.ssl.SSLSession;
@@ -68,6 +69,7 @@ import org.apache.hc.core5.http.nio.SessionOutputBuffer;
 import org.apache.hc.core5.http.nio.command.CommandSupport;
 import org.apache.hc.core5.http.nio.command.RequestExecutionCommand;
 import org.apache.hc.core5.http.nio.command.ShutdownCommand;
+import org.apache.hc.core5.http.nio.command.StaleCheckCommand;
 import org.apache.hc.core5.io.CloseMode;
 import org.apache.hc.core5.io.SocketTimeoutExceptionFactory;
 import org.apache.hc.core5.reactor.Command;
@@ -212,6 +214,8 @@ abstract class AbstractHttp1StreamDuplexer<IncomingMessage extends HttpMessage, 
 
     abstract boolean isOutputReady();
 
+    abstract boolean isRequestInitiated();
+
     abstract void produceOutput() throws HttpException, IOException;
 
     abstract void execute(RequestExecutionCommand executionCommand) throws HttpException, IOException;
@@ -242,6 +246,8 @@ abstract class AbstractHttp1StreamDuplexer<IncomingMessage extends HttpMessage, 
                     execute((RequestExecutionCommand) command);
                     return;
                 }
+            } else if (command instanceof StaleCheckCommand) {
+                doStaleCheck(((StaleCheckCommand) command).getCallback());
             } else {
                 throw new HttpException("Unexpected command: " + command.getClass());
             }
@@ -270,22 +276,21 @@ abstract class AbstractHttp1StreamDuplexer<IncomingMessage extends HttpMessage, 
             inTransportMetrics.incrementBytesTransferred(n);
         }
 
-        if (connState.compareTo(ConnectionState.GRACEFUL_SHUTDOWN) >= 0 && inbuf.hasData() && inputIdle()) {
+        if (connState.compareTo(ConnectionState.GRACEFUL_SHUTDOWN) >= 0 && !inbuf.hasData() && inputIdle()) {
             ioSession.clearEvent(SelectionKey.OP_READ);
             return;
         }
 
         boolean endOfStream = false;
-        if (incomingMessage == null) {
-            final int bytesRead = inbuf.fill(ioSession);
-            if (bytesRead > 0) {
-                inTransportMetrics.incrementBytesTransferred(bytesRead);
-            }
-            endOfStream = bytesRead == -1;
-        }
 
         do {
             if (incomingMessage == null) {
+
+                final int bytesRead = inbuf.fill(ioSession);
+                if (bytesRead > 0) {
+                    inTransportMetrics.incrementBytesTransferred(bytesRead);
+                }
+                endOfStream = bytesRead == -1;
 
                 final IncomingMessage messageHead = parseMessageHead(endOfStream);
                 if (messageHead != null) {
@@ -347,7 +352,7 @@ abstract class AbstractHttp1StreamDuplexer<IncomingMessage extends HttpMessage, 
         } while (inbuf.hasData());
 
         if (endOfStream && !inbuf.hasData()) {
-            if (outputIdle() && inputIdle()) {
+            if (inputIdle()) {
                 requestShutdown(CloseMode.GRACEFUL);
             } else {
                 shutdownSession(new ConnectionClosedException("Connection closed by peer"));
@@ -379,7 +384,7 @@ abstract class AbstractHttp1StreamDuplexer<IncomingMessage extends HttpMessage, 
                 } else {
                     outputRequests.addAndGet(-pendingOutputRequests);
                 }
-                outputEnd = outgoingMessage == null && !outbuf.hasData();
+                outputEnd = outgoingMessage == null && !outbuf.hasData() && !isRequestInitiated();
             } finally {
                 ioSession.getLock().unlock();
             }
@@ -425,6 +430,11 @@ abstract class AbstractHttp1StreamDuplexer<IncomingMessage extends HttpMessage, 
                 break;
         }
         ioSession.setEvent(SelectionKey.OP_WRITE);
+    }
+
+    void doStaleCheck(final Consumer<Boolean> callback) throws IOException {
+        callback.accept(ioSession.isOpen() &&
+                connState.compareTo(ConnectionState.ACTIVE) == 0);
     }
 
     void commitMessageHead(

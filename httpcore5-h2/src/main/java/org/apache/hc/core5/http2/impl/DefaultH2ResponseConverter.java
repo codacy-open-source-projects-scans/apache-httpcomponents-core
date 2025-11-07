@@ -30,9 +30,11 @@ package org.apache.hc.core5.http2.impl;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 
 import org.apache.hc.core5.http.Header;
 import org.apache.hc.core5.http.HttpException;
+import org.apache.hc.core5.http.HttpHeaders;
 import org.apache.hc.core5.http.HttpResponse;
 import org.apache.hc.core5.http.HttpVersion;
 import org.apache.hc.core5.http.ProtocolException;
@@ -56,19 +58,17 @@ public class DefaultH2ResponseConverter implements H2MessageConverter<HttpRespon
         String statusText = null;
         final List<Header> messageHeaders = new ArrayList<>();
 
+        int cookieCount = 0;
+
         for (int i = 0; i < headers.size(); i++) {
             final Header header = headers.get(i);
             final String name = header.getName();
             final String value = header.getValue();
 
-            for (int n = 0; n < name.length(); n++) {
-                final char ch = name.charAt(n);
-                if (Character.isAlphabetic(ch) && !Character.isLowerCase(ch)) {
-                    throw new ProtocolException("Header name '%s' is invalid (header name contains uppercase characters)", name);
-                }
-            }
-
             if (name.startsWith(":")) {
+                if (!FieldValidationSupport.isNameLowerCaseValid(name, 1, name.length())) {
+                    throw new ProtocolException("Header name '%s' is invalid", name);
+                }
                 if (!messageHeaders.isEmpty()) {
                     throw new ProtocolException("Invalid sequence of headers (pseudo-headers must precede message headers)");
                 }
@@ -81,9 +81,17 @@ public class DefaultH2ResponseConverter implements H2MessageConverter<HttpRespon
                     throw new ProtocolException("Unsupported response header '%s'", name);
                 }
             } else {
+                if (!FieldValidationSupport.isNameLowerCaseValid(name)) {
+                    throw new ProtocolException("Header name '%s' is invalid", name);
+                }
+                if (name.equalsIgnoreCase(HttpHeaders.COOKIE)) {
+                    cookieCount++;
+                }
                 messageHeaders.add(header);
             }
-
+            if (!FieldValidationSupport.isValueValid(value)) {
+                throw new ProtocolException("Header value is invalid");
+            }
         }
 
         if (statusText == null) {
@@ -100,6 +108,20 @@ public class DefaultH2ResponseConverter implements H2MessageConverter<HttpRespon
         for (int i = 0; i < messageHeaders.size(); i++) {
             response.addHeader(messageHeaders.get(i));
         }
+
+        if (cookieCount > 1) {
+            final StringBuilder buf = new StringBuilder();
+            for (final Iterator<Header> it = response.headerIterator(HttpHeaders.COOKIE); it.hasNext(); ) {
+                if (buf.length() > 0) {
+                    buf.append("; ");
+                }
+                final Header cookie = it.next();
+                buf.append(cookie.getValue());
+                it.remove();
+            }
+            response.setHeader(HttpHeaders.COOKIE.toLowerCase(Locale.ROOT), buf.toString());
+        }
+
         return response;
     }
 
@@ -116,8 +138,11 @@ public class DefaultH2ResponseConverter implements H2MessageConverter<HttpRespon
             final Header header = it.next();
             final String name = header.getName();
             final String value = header.getValue();
-            if (name.startsWith(":")) {
+            if (!FieldValidationSupport.isNameValid(name)) {
                 throw new ProtocolException("Header name '%s' is invalid", name);
+            }
+            if (!FieldValidationSupport.isValueValid(value)) {
+                throw new ProtocolException("Header value is invalid");
             }
             headers.add(new BasicHeader(TextUtils.toLowerCase(name), value));
         }

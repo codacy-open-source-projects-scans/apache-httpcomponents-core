@@ -45,6 +45,8 @@ import javax.net.ssl.SSLSession;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 
+import jdk.net.ExtendedSocketOptions;
+import jdk.net.Sockets;
 import org.apache.hc.core5.annotation.Internal;
 import org.apache.hc.core5.function.Callback;
 import org.apache.hc.core5.function.Resolver;
@@ -76,13 +78,13 @@ import org.apache.hc.core5.http.protocol.HttpProcessor;
 import org.apache.hc.core5.io.CloseMode;
 import org.apache.hc.core5.io.Closer;
 import org.apache.hc.core5.io.ModalCloseable;
-import org.apache.hc.core5.io.SocketSupport;
 import org.apache.hc.core5.net.URIAuthority;
 import org.apache.hc.core5.pool.ConnPoolControl;
 import org.apache.hc.core5.pool.ManagedConnPool;
 import org.apache.hc.core5.pool.PoolEntry;
 import org.apache.hc.core5.pool.PoolStats;
 import org.apache.hc.core5.util.Args;
+import org.apache.hc.core5.util.ReflectionUtils;
 import org.apache.hc.core5.util.TimeValue;
 import org.apache.hc.core5.util.Timeout;
 
@@ -239,6 +241,7 @@ public class HttpRequester implements ConnPoolControl<HttpHost>, ModalCloseable 
         }
     }
 
+    @SuppressWarnings("Since15")
     private HttpClientConnection createConnection(final Socket sock, final HttpHost targetHost) throws IOException {
         sock.setSoTimeout(socketConfig.getSoTimeout().toMillisecondsIntBound());
         sock.setReuseAddress(socketConfig.isSoReuseAddress());
@@ -250,14 +253,16 @@ public class HttpRequester implements ConnPoolControl<HttpHost>, ModalCloseable 
         if (socketConfig.getSndBufSize() > 0) {
             sock.setSendBufferSize(socketConfig.getSndBufSize());
         }
-        if (this.socketConfig.getTcpKeepIdle() > 0) {
-            SocketSupport.setOption(sock, SocketSupport.TCP_KEEPIDLE, this.socketConfig.getTcpKeepIdle());
-        }
-        if (this.socketConfig.getTcpKeepInterval() > 0) {
-            SocketSupport.setOption(sock, SocketSupport.TCP_KEEPINTERVAL, this.socketConfig.getTcpKeepInterval());
-        }
-        if (this.socketConfig.getTcpKeepCount() > 0) {
-            SocketSupport.setOption(sock, SocketSupport.TCP_KEEPCOUNT, this.socketConfig.getTcpKeepCount());
+        if (ReflectionUtils.supportsKeepAliveOptions()) {
+            if (this.socketConfig.getTcpKeepIdle() > 0) {
+                Sockets.setOption(sock, ExtendedSocketOptions.TCP_KEEPIDLE, this.socketConfig.getTcpKeepIdle());
+            }
+            if (this.socketConfig.getTcpKeepInterval() > 0) {
+                Sockets.setOption(sock, ExtendedSocketOptions.TCP_KEEPINTERVAL, this.socketConfig.getTcpKeepInterval());
+            }
+            if (this.socketConfig.getTcpKeepCount() > 0) {
+                Sockets.setOption(sock, ExtendedSocketOptions.TCP_KEEPCOUNT, this.socketConfig.getTcpKeepCount());
+            }
         }
         final int linger = socketConfig.getSoLinger().toMillisecondsIntBound();
         if (linger >= 0) {

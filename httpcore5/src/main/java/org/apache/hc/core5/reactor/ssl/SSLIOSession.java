@@ -93,6 +93,7 @@ public class SSLIOSession implements IOSession {
     private final AtomicInteger outboundClosedCount;
     private final AtomicReference<TLSHandShakeState> handshakeStateRef;
     private final IOEventHandler internalEventHandler;
+    private final int packetBufferSize;
 
     private int appEventMask;
 
@@ -100,6 +101,7 @@ public class SSLIOSession implements IOSession {
     private volatile Status status = Status.ACTIVE;
     private volatile Timeout socketTimeout;
     private volatile TlsDetails tlsDetails;
+    private volatile boolean appClosed;
 
     /**
      * Creates new instance of {@code SSLIOSession} class.
@@ -178,9 +180,9 @@ public class SSLIOSession implements IOSession {
 
         final SSLSession sslSession = this.sslEngine.getSession();
         // Allocate buffers for network (encrypted) data
-        final int netBufferSize = sslSession.getPacketBufferSize();
-        this.inEncrypted = SSLManagedBuffer.create(sslBufferMode, netBufferSize);
-        this.outEncrypted = SSLManagedBuffer.create(sslBufferMode, netBufferSize);
+        this.packetBufferSize = sslSession.getPacketBufferSize();
+        this.inEncrypted = SSLManagedBuffer.create(sslBufferMode, packetBufferSize);
+        this.outEncrypted = SSLManagedBuffer.create(sslBufferMode, packetBufferSize);
 
         // Allocate buffers for application (unencrypted) data
         final int appBufferSize = sslSession.getApplicationBufferSize();
@@ -476,7 +478,8 @@ public class SSLIOSession implements IOSession {
                     && (handshakeStatus == HandshakeStatus.NOT_HANDSHAKING || handshakeStatus == HandshakeStatus.FINISHED)
                     && !this.outEncrypted.hasData()
                     && this.sslEngine.isOutboundDone()
-                    && (this.endOfStream || this.sslEngine.isInboundDone())) {
+                    && (this.endOfStream || this.sslEngine.isInboundDone())
+                    && appClosed) {
                 this.status = Status.CLOSED;
             }
             // Abnormal session termination
@@ -519,8 +522,6 @@ public class SSLIOSession implements IOSession {
             // Do we have encrypted data ready to be sent?
             if (this.outEncrypted.hasData()) {
                 newMask = newMask | EventMask.WRITE;
-            } else if (this.sslEngine.isOutboundDone()) {
-                newMask = newMask & ~EventMask.WRITE;
             }
 
             // Update the mask if necessary
@@ -619,10 +620,11 @@ public class SSLIOSession implements IOSession {
                                 inPlainBuf.clear();
                             }
                         }
-                        if (result.getStatus() != SSLEngineResult.Status.OK) {
-                            if (result.getStatus() == SSLEngineResult.Status.BUFFER_UNDERFLOW && endOfStream) {
-                                throw new SSLException("Unable to decrypt incoming data due to unexpected end of stream");
-                            }
+                        if (result.getStatus() == SSLEngineResult.Status.BUFFER_UNDERFLOW && endOfStream) {
+                            throw new SSLException("Unable to decrypt incoming data due to unexpected end of stream");
+                        }
+                        if (result.getStatus() != SSLEngineResult.Status.OK ||
+                                result.getHandshakeStatus() != HandshakeStatus.NOT_HANDSHAKING && result.getHandshakeStatus() != HandshakeStatus.FINISHED) {
                             break;
                         }
                     } finally {
@@ -647,7 +649,7 @@ public class SSLIOSession implements IOSession {
         this.session.getLock().lock();
         try {
             appReady = (this.appEventMask & SelectionKey.OP_WRITE) > 0
-                    && this.status == Status.ACTIVE
+                    && this.status.compareTo(Status.CLOSED) < 0
                     && this.sslEngine.getHandshakeStatus() == HandshakeStatus.NOT_HANDSHAKING;
         } finally {
             this.session.getLock().unlock();
@@ -668,9 +670,18 @@ public class SSLIOSession implements IOSession {
             if (this.handshakeStateRef.get() == TLSHandShakeState.READY) {
                 return 0;
             }
-            final ByteBuffer outEncryptedBuf = this.outEncrypted.acquire();
-            final SSLEngineResult result = doWrap(src, outEncryptedBuf);
-            return result.bytesConsumed();
+
+            for (;;) {
+                final ByteBuffer outEncryptedBuf = this.outEncrypted.acquire();
+                final SSLEngineResult result = doWrap(src, outEncryptedBuf);
+                if (result.getStatus() == SSLEngineResult.Status.BUFFER_OVERFLOW) {
+                    // We don't release the buffer here, it will be expanded (if needed)
+                    // and returned by the next attempt of SSLManagedBuffer#acquire() call.
+                    this.outEncrypted.ensureWriteable(packetBufferSize);
+                } else {
+                    return result.bytesConsumed();
+                }
+            }
         } finally {
             this.session.getLock().unlock();
         }
@@ -714,6 +725,7 @@ public class SSLIOSession implements IOSession {
     public void close(final CloseMode closeMode) {
         this.session.getLock().lock();
         try {
+            appClosed = true;
             if (closeMode == CloseMode.GRACEFUL) {
                 if (this.status.compareTo(Status.CLOSING) >= 0) {
                     return;
@@ -761,7 +773,11 @@ public class SSLIOSession implements IOSession {
         this.session.getLock().lock();
         try {
             this.session.enqueue(command, priority);
-            setEvent(SelectionKey.OP_WRITE);
+            if (isOpen()) {
+                setEvent(SelectionKey.OP_WRITE);
+            } else {
+                command.cancel();
+            }
         } finally {
             this.session.getLock().unlock();
         }

@@ -25,45 +25,21 @@
  *
  */
 
-package org.apache.hc.core5.testing.nio;
+package org.apache.hc.core5.http.nio.support.classic;
 
-import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Nested;
-import org.junit.jupiter.api.condition.DisabledOnOs;
-import org.junit.jupiter.api.condition.OS;
+import java.io.IOException;
 
-class JSSEProviderIntegrationTests {
+import org.apache.hc.core5.annotation.Internal;
+import org.apache.hc.core5.http.HttpException;
 
-    @Nested
-    @DisplayName("Oracle (default)")
-    class Oracle extends JSSEProviderIntegrationTest {
+/**
+ * @since 5.4
+ */
+@Internal
+public class ProtocolException extends IOException {
 
-        public Oracle() {
-            super("Oracle", null);
-        }
-
-    }
-
-    @Nested
-    @DisplayName("Conscrypt (TLSv1.2)")
-    @DisabledOnOs(OS.MAC)
-    class ConscryptTlsV1_2 extends JSSEProviderIntegrationTest {
-
-        public ConscryptTlsV1_2() {
-            super("Conscrypt", "TLSv1.2");
-        }
-
-    }
-
-    @Nested
-    @DisplayName("Conscrypt (TLSv1.3)")
-    @DisabledOnOs(OS.MAC)
-    class ConscryptTlsV1_3 extends JSSEProviderIntegrationTest {
-
-        public ConscryptTlsV1_3() {
-            super("Conscrypt", "TLSv1.3");
-        }
-
+    public ProtocolException(final HttpException ex) {
+        super(ex);
     }
 
 }

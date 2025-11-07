@@ -30,7 +30,9 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
+import org.apache.hc.core5.function.Callback;
 import org.apache.hc.core5.http.ConnectionReuseStrategy;
 import org.apache.hc.core5.http.EntityDetails;
 import org.apache.hc.core5.http.Header;
@@ -62,6 +64,7 @@ import org.apache.hc.core5.http.nio.support.ImmediateResponseExchangeHandler;
 import org.apache.hc.core5.http.protocol.HttpContext;
 import org.apache.hc.core5.http.protocol.HttpCoreContext;
 import org.apache.hc.core5.http.protocol.HttpProcessor;
+import org.apache.hc.core5.io.CloseMode;
 
 class ServerHttp1StreamHandler implements ResourceHolder {
 
@@ -70,17 +73,18 @@ class ServerHttp1StreamHandler implements ResourceHolder {
     private final ResponseChannel responseChannel;
     private final HttpProcessor httpProcessor;
     private final Http1Config http1Config;
-    private final HandlerFactory<AsyncServerExchangeHandler> exchangeHandlerFactory;
     private final ConnectionReuseStrategy connectionReuseStrategy;
+    private final HandlerFactory<AsyncServerExchangeHandler> exchangeHandlerFactory;
+    private final Callback<Exception> exceptionCallback;
     private final HttpCoreContext context;
+    private final AtomicReference<MessageState> requestState;
+    private final AtomicReference<MessageState> responseState;
     private final AtomicBoolean responseCommitted;
     private final AtomicBoolean done;
 
     private volatile boolean keepAlive;
     private volatile AsyncServerExchangeHandler exchangeHandler;
     private volatile HttpRequest receivedRequest;
-    private volatile MessageState requestState;
-    private volatile MessageState responseState;
 
     ServerHttp1StreamHandler(
             final Http1StreamChannel<HttpResponse> outputChannel,
@@ -88,6 +92,7 @@ class ServerHttp1StreamHandler implements ResourceHolder {
             final Http1Config http1Config,
             final ConnectionReuseStrategy connectionReuseStrategy,
             final HandlerFactory<AsyncServerExchangeHandler> exchangeHandlerFactory,
+            final Callback<Exception> exceptionCallback,
             final HttpCoreContext context) {
         this.outputChannel = outputChannel;
         this.internalDataChannel = new DataStreamChannel() {
@@ -99,11 +104,11 @@ class ServerHttp1StreamHandler implements ResourceHolder {
 
             @Override
             public void endStream(final List<? extends Header> trailers) throws IOException {
+                responseState.set( MessageState.COMPLETE);
                 outputChannel.complete(trailers);
-                if (!keepAlive) {
+                if (requestState.get() == MessageState.COMPLETE && !keepAlive) {
                     outputChannel.close();
                 }
-                responseState = MessageState.COMPLETE;
             }
 
             @Override
@@ -138,6 +143,11 @@ class ServerHttp1StreamHandler implements ResourceHolder {
             }
 
             @Override
+            public void terminateExchange() {
+                terminate();
+            }
+
+            @Override
             public String toString() {
                 return super.toString() + " " + ServerHttp1StreamHandler.this;
             }
@@ -148,12 +158,13 @@ class ServerHttp1StreamHandler implements ResourceHolder {
         this.http1Config = http1Config != null ? http1Config : Http1Config.DEFAULT;
         this.connectionReuseStrategy = connectionReuseStrategy;
         this.exchangeHandlerFactory = exchangeHandlerFactory;
+        this.exceptionCallback = exceptionCallback;
         this.context = context;
+        this.requestState = new AtomicReference<>(MessageState.HEADERS);
+        this.responseState = new AtomicReference<>(MessageState.IDLE);
         this.responseCommitted = new AtomicBoolean();
         this.done = new AtomicBoolean();
         this.keepAlive = true;
-        this.requestState = MessageState.HEADERS;
-        this.responseState = MessageState.IDLE;
     }
 
     private void commitResponse(
@@ -184,15 +195,18 @@ class ServerHttp1StreamHandler implements ResourceHolder {
                 keepAlive = false;
             }
 
-            outputChannel.submit(response, endStream, endStream ? FlushMode.IMMEDIATE : FlushMode.BUFFER);
             if (endStream) {
+                responseState.set(MessageState.COMPLETE);
+                outputChannel.submit(response, true, FlushMode.IMMEDIATE);
                 if (!keepAlive) {
                     outputChannel.close();
                 }
-                responseState = MessageState.COMPLETE;
             } else {
-                responseState = MessageState.BODY;
+                outputChannel.submit(response, false, FlushMode.BUFFER);
                 exchangeHandler.produce(internalDataChannel);
+                if (responseState.compareAndSet(MessageState.IDLE, MessageState.BODY)) {
+                    outputChannel.requestOutput();
+                }
             }
         } else {
             throw new HttpException("Response already committed");
@@ -214,12 +228,16 @@ class ServerHttp1StreamHandler implements ResourceHolder {
         throw new HttpException("HTTP/1.1 does not support server push");
     }
 
+    private void terminate() {
+        outputChannel.close(CloseMode.IMMEDIATE);
+    }
+
     void activateChannel() throws IOException, HttpException {
         outputChannel.activate();
     }
 
     boolean isResponseFinal() {
-        return responseState == MessageState.COMPLETE;
+        return responseState.get() == MessageState.COMPLETE;
     }
 
     boolean keepAlive() {
@@ -227,15 +245,15 @@ class ServerHttp1StreamHandler implements ResourceHolder {
     }
 
     boolean isCompleted() {
-        return requestState == MessageState.COMPLETE && responseState == MessageState.COMPLETE;
+        return requestState.get() == MessageState.COMPLETE && responseState.get() == MessageState.COMPLETE;
     }
 
     void terminateExchange(final HttpException ex) throws HttpException, IOException {
-        if (done.get() || requestState != MessageState.HEADERS) {
+        if (done.get() || requestState.get() != MessageState.HEADERS) {
             throw new ProtocolException("Unexpected message head");
         }
         receivedRequest = null;
-        requestState = MessageState.COMPLETE;
+        requestState.set(MessageState.COMPLETE);
         final HttpResponse response = new BasicHttpResponse(ServerSupport.toStatusCode(ex));
         response.addHeader(HttpHeaders.CONNECTION, HeaderElements.CLOSE);
         final AsyncResponseProducer responseProducer = new BasicResponseProducer(response, ServerSupport.toErrorMessage(ex));
@@ -244,20 +262,19 @@ class ServerHttp1StreamHandler implements ResourceHolder {
     }
 
     void consumeHeader(final HttpRequest request, final EntityDetails requestEntityDetails) throws HttpException, IOException {
-        if (done.get() || requestState != MessageState.HEADERS) {
+        if (done.get() || requestState.get() != MessageState.HEADERS) {
             throw new ProtocolException("Unexpected message head");
         }
         receivedRequest = request;
-        requestState = requestEntityDetails == null ? MessageState.COMPLETE : MessageState.BODY;
-
-        final ProtocolVersion transportVersion = request.getVersion();
-        if (transportVersion != null && transportVersion.greaterEquals(HttpVersion.HTTP_2)) {
-            throw new UnsupportedHttpVersionException(transportVersion);
-        }
-        context.setProtocolVersion(transportVersion != null ? transportVersion : http1Config.getVersion());
-        context.setRequest(request);
-
+        requestState.set(requestEntityDetails == null ? MessageState.COMPLETE : MessageState.BODY);
         try {
+            final ProtocolVersion transportVersion = request.getVersion();
+            if (transportVersion != null && transportVersion.greaterEquals(HttpVersion.HTTP_2)) {
+                throw new UnsupportedHttpVersionException(transportVersion);
+            }
+            context.setProtocolVersion(transportVersion != null ? transportVersion : http1Config.getVersion());
+            context.setRequest(request);
+
             httpProcessor.process(request, requestEntityDetails, context);
 
             AsyncServerExchangeHandler handler;
@@ -289,7 +306,7 @@ class ServerHttp1StreamHandler implements ResourceHolder {
     }
 
     boolean isOutputReady() {
-        switch (responseState) {
+        switch (responseState.get()) {
             case BODY:
                 return exchangeHandler.available() > 0;
             default:
@@ -298,7 +315,7 @@ class ServerHttp1StreamHandler implements ResourceHolder {
     }
 
     void produceOutput() throws IOException {
-        switch (responseState) {
+        switch (responseState.get()) {
             case BODY:
                 exchangeHandler.produce(internalDataChannel);
                 break;
@@ -306,10 +323,10 @@ class ServerHttp1StreamHandler implements ResourceHolder {
     }
 
     void consumeData(final ByteBuffer src) throws HttpException, IOException {
-        if (done.get() || requestState != MessageState.BODY) {
+        if (done.get() || requestState.get() != MessageState.BODY) {
             throw new ProtocolException("Unexpected message data");
         }
-        if (responseState == MessageState.ACK) {
+        if (responseState.get() == MessageState.ACK) {
             outputChannel.requestOutput();
         }
         exchangeHandler.consume(src);
@@ -320,31 +337,38 @@ class ServerHttp1StreamHandler implements ResourceHolder {
     }
 
     void dataEnd(final List<? extends Header> trailers) throws HttpException, IOException {
-        if (done.get() || requestState != MessageState.BODY) {
+        if (done.get() || requestState.get() != MessageState.BODY) {
             throw new ProtocolException("Unexpected message data");
         }
-        requestState = MessageState.COMPLETE;
+        requestState.set(MessageState.COMPLETE);
+        if (responseState.get() == MessageState.COMPLETE && !keepAlive) {
+            outputChannel.close();
+        }
         exchangeHandler.streamEnd(trailers);
     }
 
     void failed(final Exception cause) {
-        if (!done.get()) {
+        if (!done.get() && exchangeHandler != null) {
             exchangeHandler.failed(cause);
+        } else if (exceptionCallback != null) {
+            exceptionCallback.execute(cause);
         }
     }
 
     @Override
     public void releaseResources() {
         if (done.compareAndSet(false, true)) {
-            requestState = MessageState.COMPLETE;
-            responseState = MessageState.COMPLETE;
-            exchangeHandler.releaseResources();
+            requestState.set(MessageState.COMPLETE);
+            responseState.set(MessageState.COMPLETE);
+            if (exchangeHandler != null) {
+                exchangeHandler.releaseResources();
+            }
         }
     }
 
     void appendState(final StringBuilder buf) {
-        buf.append("requestState=").append(requestState)
-                .append(", responseState=").append(responseState)
+        buf.append("requestState=").append(requestState.get())
+                .append(", responseState=").append(responseState.get())
                 .append(", responseCommitted=").append(responseCommitted)
                 .append(", keepAlive=").append(keepAlive)
                 .append(", done=").append(done);

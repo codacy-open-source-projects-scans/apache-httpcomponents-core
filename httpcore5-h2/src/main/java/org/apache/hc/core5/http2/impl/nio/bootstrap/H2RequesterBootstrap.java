@@ -50,6 +50,7 @@ import org.apache.hc.core5.http.protocol.HttpProcessor;
 import org.apache.hc.core5.http.protocol.UriPatternType;
 import org.apache.hc.core5.http2.HttpVersionPolicy;
 import org.apache.hc.core5.http2.config.H2Config;
+import org.apache.hc.core5.http2.frame.FrameFactory;
 import org.apache.hc.core5.http2.impl.H2Processors;
 import org.apache.hc.core5.http2.impl.nio.ClientH2StreamMultiplexerFactory;
 import org.apache.hc.core5.http2.impl.nio.ClientHttpProtocolNegotiationStarter;
@@ -62,6 +63,7 @@ import org.apache.hc.core5.pool.LaxConnPool;
 import org.apache.hc.core5.pool.ManagedConnPool;
 import org.apache.hc.core5.pool.PoolConcurrencyPolicy;
 import org.apache.hc.core5.pool.PoolReusePolicy;
+import org.apache.hc.core5.pool.RouteSegmentedConnPool;
 import org.apache.hc.core5.pool.StrictConnPool;
 import org.apache.hc.core5.reactor.IOEventHandlerFactory;
 import org.apache.hc.core5.reactor.IOReactorConfig;
@@ -101,6 +103,7 @@ public class H2RequesterBootstrap {
     private Http1StreamListener http1StreamListener;
     private ConnPoolListener<HttpHost> connPoolListener;
     private IOReactorMetricsListener threadPoolListener;
+    private FrameFactory frameFactory;
 
 
     private H2RequesterBootstrap() {
@@ -304,6 +307,17 @@ public class H2RequesterBootstrap {
     }
 
     /**
+     * Sets {@link FrameFactory} instance.
+     *
+     * @since 5.4
+     * @return this instance.
+     */
+    public final H2RequesterBootstrap setFrameFactory(final FrameFactory frameFactory) {
+        this.frameFactory = frameFactory;
+        return this;
+    }
+
+    /**
      * Registers the given {@link AsyncPushConsumer} {@link Supplier} as a default handler for URIs
      * matching the given pattern.
      *
@@ -357,6 +371,14 @@ public class H2RequesterBootstrap {
                         new DefaultDisposalCallback<>(),
                         connPoolListener);
                 break;
+            case OFFLOCK:
+                connPool = new RouteSegmentedConnPool<>(
+                        defaultMaxPerRoute > 0 ? defaultMaxPerRoute : 20,
+                        maxTotal > 0 ? maxTotal : 50,
+                        timeToLive,
+                        poolReusePolicy,
+                        new DefaultDisposalCallback<>());
+                break;
             case STRICT:
             default:
                 connPool = new StrictConnPool<>(
@@ -376,7 +398,8 @@ public class H2RequesterBootstrap {
                 new DefaultAsyncPushConsumerFactory(requestRouter),
                 h2Config != null ? h2Config : H2Config.DEFAULT,
                 charCodingConfig != null ? charCodingConfig : CharCodingConfig.DEFAULT,
-                streamListener);
+                streamListener,
+                frameFactory);
 
         final TlsStrategy actualTlsStrategy = tlsStrategy != null ? tlsStrategy : new H2ClientTlsStrategy();
 
@@ -396,7 +419,8 @@ public class H2RequesterBootstrap {
                 http2StreamHandlerFactory,
                 versionPolicy != null ? versionPolicy : HttpVersionPolicy.NEGOTIATE,
                 actualTlsStrategy,
-                handshakeTimeout);
+                handshakeTimeout,
+                exceptionCallback);
 
         return new H2AsyncRequester(
                 versionPolicy != null ? versionPolicy : HttpVersionPolicy.NEGOTIATE,

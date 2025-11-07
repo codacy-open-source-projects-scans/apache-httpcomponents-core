@@ -41,6 +41,8 @@ import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLServerSocketFactory;
 
+import jdk.net.ExtendedSocketOptions;
+import jdk.net.Sockets;
 import org.apache.hc.core5.annotation.Internal;
 import org.apache.hc.core5.concurrent.DefaultThreadFactory;
 import org.apache.hc.core5.function.Callback;
@@ -56,8 +58,8 @@ import org.apache.hc.core5.http.io.SocketConfig;
 import org.apache.hc.core5.io.CloseMode;
 import org.apache.hc.core5.io.Closer;
 import org.apache.hc.core5.io.ModalCloseable;
-import org.apache.hc.core5.io.SocketSupport;
 import org.apache.hc.core5.util.Args;
+import org.apache.hc.core5.util.ReflectionUtils;
 import org.apache.hc.core5.util.TimeValue;
 import org.apache.hc.core5.util.Timeout;
 
@@ -138,6 +140,7 @@ public class HttpServer implements ModalCloseable {
         return -1;
     }
 
+    @SuppressWarnings("Since15")
     public void start() throws IOException {
         if (this.status.compareAndSet(Status.READY, Status.ACTIVE)) {
             this.serverSocket = this.serverSocketFactory.createServerSocket(
@@ -146,14 +149,16 @@ public class HttpServer implements ModalCloseable {
             if (this.socketConfig.getRcvBufSize() > 0) {
                 this.serverSocket.setReceiveBufferSize(this.socketConfig.getRcvBufSize());
             }
-            if (this.socketConfig.getTcpKeepIdle() > 0) {
-                SocketSupport.setOption(this.serverSocket, SocketSupport.TCP_KEEPIDLE, this.socketConfig.getTcpKeepIdle());
-            }
-            if (this.socketConfig.getTcpKeepInterval() > 0) {
-                SocketSupport.setOption(this.serverSocket, SocketSupport.TCP_KEEPINTERVAL, this.socketConfig.getTcpKeepInterval());
-            }
-            if (this.socketConfig.getTcpKeepCount() > 0) {
-                SocketSupport.setOption(this.serverSocket, SocketSupport.TCP_KEEPCOUNT, this.socketConfig.getTcpKeepCount());
+            if (ReflectionUtils.supportsKeepAliveOptions()) {
+                if (this.socketConfig.getTcpKeepIdle() > 0) {
+                    Sockets.setOption(this.serverSocket, ExtendedSocketOptions.TCP_KEEPIDLE, this.socketConfig.getTcpKeepIdle());
+                }
+                if (this.socketConfig.getTcpKeepInterval() > 0) {
+                    Sockets.setOption(this.serverSocket, ExtendedSocketOptions.TCP_KEEPINTERVAL, this.socketConfig.getTcpKeepInterval());
+                }
+                if (this.socketConfig.getTcpKeepCount() > 0) {
+                    Sockets.setOption(this.serverSocket, ExtendedSocketOptions.TCP_KEEPCOUNT, this.socketConfig.getTcpKeepCount());
+                }
             }
             if (this.sslSetupHandler != null && this.serverSocket instanceof SSLServerSocket) {
                 final SSLServerSocket sslServerSocket = (SSLServerSocket) this.serverSocket;

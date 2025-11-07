@@ -29,11 +29,13 @@ package org.apache.hc.core5.http.nio.support.classic;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.nio.ByteBuffer;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 
 import org.apache.hc.core5.annotation.Contract;
 import org.apache.hc.core5.annotation.ThreadingBehavior;
 import org.apache.hc.core5.http.nio.DataStreamChannel;
+import org.apache.hc.core5.util.Timeout;
 
 /**
  * @since 5.0
@@ -41,14 +43,14 @@ import org.apache.hc.core5.http.nio.DataStreamChannel;
 @Contract(threading = ThreadingBehavior.SAFE)
 public final class SharedOutputBuffer extends AbstractSharedBuffer implements ContentOutputBuffer {
 
+    private final AtomicBoolean endStreamPropagated;
     private volatile DataStreamChannel dataStreamChannel;
     private volatile boolean hasCapacity;
-    private volatile boolean endStreamPropagated;
 
     public SharedOutputBuffer(final ReentrantLock lock, final int initialBufferSize) {
         super(lock, initialBufferSize);
         this.hasCapacity = false;
-        this.endStreamPropagated = false;
+        this.endStreamPropagated = new AtomicBoolean();
     }
 
     public SharedOutputBuffer(final int bufferSize) {
@@ -79,8 +81,10 @@ public final class SharedOutputBuffer extends AbstractSharedBuffer implements Co
         }
     }
 
-    @Override
-    public void write(final byte[] b, final int off, final int len) throws IOException {
+    /**
+     * @since 5.4
+     */
+    public void write(final byte[] b, final int off, final int len, final Timeout timeout) throws IOException {
         final ByteBuffer src = ByteBuffer.wrap(b, off, len);
         lock.lock();
         try {
@@ -92,13 +96,13 @@ public final class SharedOutputBuffer extends AbstractSharedBuffer implements Co
                     buffer().put(src);
                 } else {
                     if (buffer().position() > 0 || dataStreamChannel == null) {
-                        waitFlush();
+                        waitFlush(timeout);
                     }
                     if (buffer().position() == 0 && dataStreamChannel != null) {
                         final int bytesWritten = dataStreamChannel.write(src);
                         if (bytesWritten == 0) {
                             hasCapacity = false;
-                            waitFlush();
+                            waitFlush(timeout);
                         }
                     }
                 }
@@ -109,13 +113,20 @@ public final class SharedOutputBuffer extends AbstractSharedBuffer implements Co
     }
 
     @Override
-    public void write(final int b) throws IOException {
+    public void write(final byte[] b, final int off, final int len) throws IOException {
+        write(b, off, len, null);
+    }
+
+    /**
+     * @since 5.4
+     */
+    public void write(final int b, final Timeout timeout) throws IOException {
         lock.lock();
         try {
             ensureNotAborted();
             setInputMode();
             if (!buffer().hasRemaining()) {
-                waitFlush();
+                waitFlush(timeout);
             }
             buffer().put((byte)b);
         } finally {
@@ -124,7 +135,14 @@ public final class SharedOutputBuffer extends AbstractSharedBuffer implements Co
     }
 
     @Override
-    public void writeCompleted() throws IOException {
+    public void write(final int b) throws IOException {
+        write(b, null);
+    }
+
+    /**
+     * @since 5.4
+     */
+    public void writeCompleted(final Timeout timeout) throws IOException {
         if (endStream) {
             return;
         }
@@ -136,6 +154,7 @@ public final class SharedOutputBuffer extends AbstractSharedBuffer implements Co
                     setOutputMode();
                     if (buffer().hasRemaining()) {
                         dataStreamChannel.requestOutput();
+                        waitEndStream(timeout);
                     } else {
                         propagateEndStream();
                     }
@@ -146,28 +165,51 @@ public final class SharedOutputBuffer extends AbstractSharedBuffer implements Co
         }
     }
 
-    private void waitFlush() throws InterruptedIOException {
-        setOutputMode();
+    @Override
+    public void writeCompleted() throws IOException {
+        writeCompleted(null);
+    }
+
+    private void waitFlush(final Timeout timeout) throws InterruptedIOException {
         if (dataStreamChannel != null) {
             dataStreamChannel.requestOutput();
         }
-        ensureNotAborted();
+        setOutputMode();
         while (buffer().hasRemaining() || !hasCapacity) {
-            try {
-                condition.await();
-            } catch (final InterruptedException ex) {
-                Thread.currentThread().interrupt();
-                throw new InterruptedIOException(ex.getMessage());
-            }
             ensureNotAborted();
+            waitForSignal(timeout);
         }
         setInputMode();
     }
 
+    private void waitEndStream(final Timeout timeout) throws InterruptedIOException {
+        if (dataStreamChannel != null) {
+            dataStreamChannel.requestOutput();
+        }
+        while (!endStreamPropagated.get() && !aborted) {
+            waitForSignal(timeout);
+        }
+    }
+
+    private void waitForSignal(final Timeout timeout) throws InterruptedIOException {
+        try {
+            if (timeout == null) {
+                condition.await();
+            } else {
+                if (!condition.await(timeout.getDuration(), timeout.getTimeUnit())) {
+                    aborted = true;
+                    throw new InterruptedIOException("Timeout blocked waiting for output (" + timeout + ")");
+                }
+            }
+        } catch (final InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw new InterruptedIOException(ex.getMessage());
+        }
+    }
+
     private void propagateEndStream() throws IOException {
-        if (!endStreamPropagated) {
+        if (endStreamPropagated.compareAndSet(false, true)) {
             dataStreamChannel.endStream();
-            endStreamPropagated = true;
         }
     }
 

@@ -29,9 +29,11 @@ package org.apache.hc.core5.reactor;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.net.ProtocolFamily;
 import java.net.Socket;
 import java.net.SocketAddress;
-import java.net.SocketOption;
+import java.net.StandardProtocolFamily;
+import java.net.StandardSocketOptions;
 import java.net.UnknownHostException;
 import java.nio.channels.CancelledKeyException;
 import java.nio.channels.ClosedChannelException;
@@ -45,14 +47,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
+import jdk.net.ExtendedSocketOptions;
 import org.apache.hc.core5.concurrent.FutureCallback;
 import org.apache.hc.core5.function.Callback;
 import org.apache.hc.core5.function.Decorator;
 import org.apache.hc.core5.io.CloseMode;
 import org.apache.hc.core5.io.Closer;
-import org.apache.hc.core5.io.SocketSupport;
 import org.apache.hc.core5.net.NamedEndpoint;
 import org.apache.hc.core5.util.Args;
+import org.apache.hc.core5.util.ReflectionUtils;
 import org.apache.hc.core5.util.Timeout;
 
 class SingleCoreIOReactor extends AbstractSingleCoreIOReactor implements ConnectionInitiator, IOWorkerStats {
@@ -64,7 +67,7 @@ class SingleCoreIOReactor extends AbstractSingleCoreIOReactor implements Connect
     private final Decorator<IOSession> ioSessionDecorator;
     private final IOSessionListener sessionListener;
     private final Callback<IOSession> sessionShutdownCallback;
-    private final Queue<InternalDataChannel> closedSessions;
+    private final Queue<IOSession> closedSessions;
     private final Queue<ChannelEntry> channelQueue;
     private final Queue<IOSessionRequest> requestQueue;
     private final AtomicBoolean shutdownInitiated;
@@ -111,6 +114,7 @@ class SingleCoreIOReactor extends AbstractSingleCoreIOReactor implements Connect
     void doTerminate() {
         closePendingChannels();
         closePendingConnectionRequests();
+        closeOpenChannels();
         processClosedSessions();
     }
 
@@ -218,13 +222,12 @@ class SingleCoreIOReactor extends AbstractSingleCoreIOReactor implements Connect
             } catch (final ClosedChannelException ex) {
                 return;
             }
-            final IOSession ioSession = new IOSessionImpl("a", key, socketChannel);
+            final IOSessionImpl ioSession = new IOSessionImpl("a", key, socketChannel, closedSessions::add);
             final InternalDataChannel dataChannel = new InternalDataChannel(
                     ioSession,
                     null,
                     ioSessionDecorator,
-                    sessionListener,
-                    closedSessions);
+                    sessionListener);
             dataChannel.setSocketTimeout(this.reactorConfig.getSoTimeout());
             dataChannel.upgrade(this.eventHandlerFactory.createHandler(dataChannel, attachment));
             key.attach(dataChannel);
@@ -234,12 +237,18 @@ class SingleCoreIOReactor extends AbstractSingleCoreIOReactor implements Connect
 
     private void processClosedSessions() {
         for (;;) {
-            final InternalDataChannel dataChannel = this.closedSessions.poll();
-            if (dataChannel == null) {
+            final IOSession ioSession = this.closedSessions.poll();
+            if (ioSession == null) {
                 break;
             }
             try {
-                dataChannel.disconnected();
+                if (sessionListener != null) {
+                    sessionListener.disconnected(ioSession);
+                }
+                final IOEventHandler handler = ioSession.getHandler();
+                if (handler != null) {
+                    handler.disconnected(ioSession);
+                }
             } catch (final CancelledKeyException ex) {
                 // ignore and move on
             }
@@ -276,44 +285,40 @@ class SingleCoreIOReactor extends AbstractSingleCoreIOReactor implements Connect
         return sessionRequest;
     }
 
+    @SuppressWarnings("Since15")
     private void prepareSocket(final SocketChannel socketChannel) throws IOException {
-        final Socket socket = socketChannel.socket();
-        socket.setTcpNoDelay(this.reactorConfig.isTcpNoDelay());
-        socket.setKeepAlive(this.reactorConfig.isSoKeepAlive());
         if (this.reactorConfig.getSndBufSize() > 0) {
-            socket.setSendBufferSize(this.reactorConfig.getSndBufSize());
+            socketChannel.setOption(StandardSocketOptions.SO_SNDBUF, this.reactorConfig.getSndBufSize());
         }
         if (this.reactorConfig.getRcvBufSize() > 0) {
-            socket.setReceiveBufferSize(this.reactorConfig.getRcvBufSize());
-        }
-        if (this.reactorConfig.getTrafficClass() > 0) {
-            socket.setTrafficClass(this.reactorConfig.getTrafficClass());
+            socketChannel.setOption(StandardSocketOptions.SO_RCVBUF, this.reactorConfig.getRcvBufSize());
         }
         final int linger = this.reactorConfig.getSoLinger().toSecondsIntBound();
         if (linger >= 0) {
-            socket.setSoLinger(true, linger);
+            socketChannel.setOption(StandardSocketOptions.SO_LINGER, linger);
         }
-        if (this.reactorConfig.getTcpKeepIdle() > 0) {
-            setExtendedSocketOption(socketChannel, SocketSupport.TCP_KEEPIDLE, this.reactorConfig.getTcpKeepIdle());
-        }
-        if (this.reactorConfig.getTcpKeepInterval() > 0) {
-            setExtendedSocketOption(socketChannel, SocketSupport.TCP_KEEPINTERVAL, this.reactorConfig.getTcpKeepInterval());
-        }
-        if (this.reactorConfig.getTcpKeepInterval() > 0) {
-            setExtendedSocketOption(socketChannel, SocketSupport.TCP_KEEPCOUNT, this.reactorConfig.getTcpKeepCount());
-        }
-    }
 
-    /**
-     * @since 5.3
-     */
-    <T> void setExtendedSocketOption(final SocketChannel socketChannel,
-                                     final String optionName, final T value) throws IOException {
-        final SocketOption<T> socketOption = SocketSupport.getExtendedSocketOptionOrNull(optionName);
-        if (socketOption == null) {
-            throw new UnsupportedOperationException(optionName + " is not supported in the current jdk");
+        // None of the below options are applicable to Unix domain sockets.
+        if (!(socketChannel.getRemoteAddress() instanceof InetSocketAddress)) {
+            return;
         }
-        socketChannel.setOption(socketOption, value);
+        socketChannel.setOption(StandardSocketOptions.TCP_NODELAY, this.reactorConfig.isTcpNoDelay());
+        socketChannel.setOption(StandardSocketOptions.SO_KEEPALIVE, this.reactorConfig.isSoKeepAlive());
+
+        if (this.reactorConfig.getTrafficClass() > 0) {
+            socketChannel.setOption(StandardSocketOptions.IP_TOS, this.reactorConfig.getTrafficClass());
+        }
+        if (ReflectionUtils.supportsKeepAliveOptions()) {
+            if (this.reactorConfig.getTcpKeepIdle() > 0) {
+                socketChannel.setOption(ExtendedSocketOptions.TCP_KEEPIDLE, this.reactorConfig.getTcpKeepIdle());
+            }
+            if (this.reactorConfig.getTcpKeepInterval() > 0) {
+                socketChannel.setOption(ExtendedSocketOptions.TCP_KEEPINTERVAL, this.reactorConfig.getTcpKeepInterval());
+            }
+            if (this.reactorConfig.getTcpKeepCount() > 0) {
+                socketChannel.setOption(ExtendedSocketOptions.TCP_KEEPCOUNT, this.reactorConfig.getTcpKeepCount());
+            }
+        }
     }
 
     private void validateAddress(final SocketAddress address) throws UnknownHostException {
@@ -340,7 +345,7 @@ class SingleCoreIOReactor extends AbstractSingleCoreIOReactor implements Connect
             if (!sessionRequest.isCancelled()) {
                 final SocketChannel socketChannel;
                 try {
-                    socketChannel = SocketChannel.open();
+                    socketChannel = openSocketFor(sessionRequest.remoteAddress);
                 } catch (final IOException ex) {
                     sessionRequest.failed(ex);
                     return;
@@ -352,6 +357,18 @@ class SingleCoreIOReactor extends AbstractSingleCoreIOReactor implements Connect
                     sessionRequest.failed(ex);
                 }
             }
+        }
+    }
+
+    private static SocketChannel openSocketFor(final SocketAddress remoteAddress) throws IOException {
+        if (remoteAddress instanceof InetSocketAddress) {
+            return SocketChannel.open();
+        }
+        try {
+            return (SocketChannel) SocketChannel.class.getMethod("open", ProtocolFamily.class)
+                .invoke(null, StandardProtocolFamily.valueOf("UNIX"));
+        } catch (final ReflectiveOperationException e) {
+            throw new UnsupportedOperationException("UNIX-family socket channels not supported", e);
         }
     }
 
@@ -374,13 +391,12 @@ class SingleCoreIOReactor extends AbstractSingleCoreIOReactor implements Connect
         validateAddress(remoteAddress);
         final boolean connected = socketChannel.connect(remoteAddress);
         final SelectionKey key = socketChannel.register(this.selector, SelectionKey.OP_CONNECT | SelectionKey.OP_READ);
-        final IOSession ioSession = new IOSessionImpl("c", key, socketChannel);
+        final IOSessionImpl ioSession = new IOSessionImpl("c", key, socketChannel, closedSessions::add);
         final InternalDataChannel dataChannel = new InternalDataChannel(
                 ioSession,
                 sessionRequest.remoteEndpoint,
                 ioSessionDecorator,
-                sessionListener,
-                closedSessions);
+                sessionListener);
         dataChannel.setSocketTimeout(reactorConfig.getSoTimeout());
         final InternalChannel connectChannel = new InternalConnectChannel(
                 key,
@@ -394,6 +410,16 @@ class SingleCoreIOReactor extends AbstractSingleCoreIOReactor implements Connect
         } else {
             key.attach(connectChannel);
             sessionRequest.assign(connectChannel);
+        }
+    }
+
+    private void closeOpenChannels() {
+        for (final SelectionKey key : selector.keys()) {
+            final Object attachment = key.attachment();
+            if (attachment instanceof InternalChannel) {
+                final InternalChannel channel = (InternalChannel) attachment;
+                channel.close(CloseMode.IMMEDIATE);
+            }
         }
     }
 

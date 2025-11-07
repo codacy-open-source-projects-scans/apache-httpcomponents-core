@@ -38,7 +38,8 @@ public enum H2Param {
     MAX_CONCURRENT_STREAMS(0x3),
     INITIAL_WINDOW_SIZE(0x4),
     MAX_FRAME_SIZE(0x5),
-    MAX_HEADER_LIST_SIZE(0x6);
+    MAX_HEADER_LIST_SIZE(0x6),
+    SETTINGS_NO_RFC7540_PRIORITIES (0x9);
 
     int code;
 
@@ -50,25 +51,32 @@ public enum H2Param {
         return code;
     }
 
-    private static final H2Param[] LOOKUP_TABLE = new H2Param[6];
+    private static final H2Param[] LOOKUP_TABLE;
     static {
-        for (final H2Param param: H2Param.values()) {
-            LOOKUP_TABLE[param.code - 1] = param;
+        int max = 0;
+        for (final H2Param p : H2Param.values()) {
+            if (p.code > max) {
+                max = p.code;
+            }
+        }
+        LOOKUP_TABLE = new H2Param[max + 1];
+        for (final H2Param p : H2Param.values()) {
+            LOOKUP_TABLE[p.code] = p;
         }
     }
 
     public static H2Param valueOf(final int code) {
-        if (code < 1 || code > LOOKUP_TABLE.length) {
+        if (code < 0 || code >= LOOKUP_TABLE.length) {
             return null;
         }
-        return LOOKUP_TABLE[code - 1];
+        return LOOKUP_TABLE[code];
     }
 
     public static String toString(final int code) {
-        if (code < 1 || code > LOOKUP_TABLE.length) {
+        if (code < 0 || code >= LOOKUP_TABLE.length || LOOKUP_TABLE[code] == null) {
             return Integer.toString(code);
         }
-        return LOOKUP_TABLE[code - 1].name();
+        return LOOKUP_TABLE[code].name();
     }
 
 }

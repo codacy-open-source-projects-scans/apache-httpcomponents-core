@@ -117,6 +117,11 @@ public class ClientHttp1StreamDuplexer extends AbstractHttp1StreamDuplexer<HttpR
             }
 
             @Override
+            public void close(final CloseMode closeMode) {
+                shutdownSession(closeMode);
+            }
+
+            @Override
             public void submit(
                     final HttpRequest request,
                     final boolean endStream,
@@ -287,13 +292,18 @@ public class ClientHttp1StreamDuplexer extends AbstractHttp1StreamDuplexer<HttpR
     }
 
     @Override
+    boolean isRequestInitiated() {
+        return outgoing != null && !outgoing.isRequestFinal();
+    }
+
+    @Override
     boolean inputIdle() {
-        return incoming == null;
+        return incoming == null && pipeline.isEmpty();
     }
 
     @Override
     boolean outputIdle() {
-        return outgoing == null && pipeline.isEmpty();
+        return outgoing == null;
     }
 
     @Override
@@ -386,7 +396,6 @@ public class ClientHttp1StreamDuplexer extends AbstractHttp1StreamDuplexer<HttpR
 
     @Override
     void appendState(final StringBuilder buf) {
-        super.appendState(buf);
         super.appendState(buf);
         buf.append(", incoming=[");
         if (incoming != null) {

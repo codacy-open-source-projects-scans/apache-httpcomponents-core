@@ -35,16 +35,19 @@ import org.apache.hc.core5.http.Header;
 import org.apache.hc.core5.http.HttpException;
 import org.apache.hc.core5.http.RequestHeaderFieldsTooLargeException;
 import org.apache.hc.core5.http.config.CharCodingConfig;
-import org.apache.hc.core5.http.impl.BasicHttpConnectionMetrics;
+import org.apache.hc.core5.http.nio.AsyncClientExchangeHandler;
 import org.apache.hc.core5.http.nio.AsyncPushConsumer;
+import org.apache.hc.core5.http.nio.AsyncPushProducer;
 import org.apache.hc.core5.http.nio.AsyncServerExchangeHandler;
 import org.apache.hc.core5.http.nio.HandlerFactory;
-import org.apache.hc.core5.http.nio.command.ExecutableCommand;
+import org.apache.hc.core5.http.protocol.HttpContext;
 import org.apache.hc.core5.http.protocol.HttpCoreContext;
 import org.apache.hc.core5.http.protocol.HttpProcessor;
 import org.apache.hc.core5.http2.H2ConnectionException;
 import org.apache.hc.core5.http2.H2Error;
 import org.apache.hc.core5.http2.config.H2Config;
+import org.apache.hc.core5.http2.config.H2Param;
+import org.apache.hc.core5.http2.config.H2Setting;
 import org.apache.hc.core5.http2.frame.DefaultFrameFactory;
 import org.apache.hc.core5.http2.frame.FrameFactory;
 import org.apache.hc.core5.http2.frame.StreamIdGenerator;
@@ -86,11 +89,26 @@ public class ServerH2StreamMultiplexer extends AbstractH2StreamMultiplexer {
     }
 
     @Override
-    void acceptHeaderFrame() throws H2ConnectionException {
+    void validateSetting(final H2Param param, final int value) throws H2ConnectionException {
     }
 
     @Override
-    void acceptPushRequest() throws H2ConnectionException {
+    H2Setting[] generateSettings(final H2Config localConfig) {
+        return new H2Setting[] {
+                new H2Setting(H2Param.HEADER_TABLE_SIZE, localConfig.getHeaderTableSize()),
+                new H2Setting(H2Param.MAX_CONCURRENT_STREAMS, localConfig.getMaxConcurrentStreams()),
+                new H2Setting(H2Param.INITIAL_WINDOW_SIZE, localConfig.getInitialWindowSize()),
+                new H2Setting(H2Param.MAX_FRAME_SIZE, localConfig.getMaxFrameSize()),
+                new H2Setting(H2Param.MAX_HEADER_LIST_SIZE, localConfig.getMaxHeaderListSize())
+        };
+    }
+
+    @Override
+    void acceptHeaderFrame() {
+    }
+
+    @Override
+    void acceptPushRequest() {
     }
 
     @Override
@@ -99,24 +117,40 @@ public class ServerH2StreamMultiplexer extends AbstractH2StreamMultiplexer {
     }
 
     @Override
-    H2StreamHandler createRemotelyInitiatedStream(
-            final H2StreamChannel channel,
-            final HttpProcessor httpProcessor,
-            final BasicHttpConnectionMetrics connMetrics,
-            final HandlerFactory<AsyncPushConsumer> pushHandlerFactory) throws IOException {
+    H2StreamHandler incomingRequest(final H2StreamChannel channel) {
         final HttpCoreContext context = HttpCoreContext.create();
         context.setSSLSession(getSSLSession());
         context.setEndpointDetails(getEndpointDetails());
-        return new ServerH2StreamHandler(channel, httpProcessor, connMetrics, exchangeHandlerFactory, context);
+        return new ServerH2StreamHandler(channel, getHttpProcessor(), getConnMetrics(), exchangeHandlerFactory, context);
     }
 
     @Override
-    H2StreamHandler createLocallyInitiatedStream(
-            final ExecutableCommand command,
+    H2StreamHandler outgoingRequest(
             final H2StreamChannel channel,
-            final HttpProcessor httpProcessor,
-            final BasicHttpConnectionMetrics connMetrics) throws IOException {
-        throw new H2ConnectionException(H2Error.INTERNAL_ERROR, "Illegal attempt to execute a request");
+            final AsyncClientExchangeHandler exchangeHandler,
+            final HandlerFactory<AsyncPushConsumer> pushHandlerFactory,
+            final HttpContext context) throws IOException {
+        throw new H2ConnectionException(H2Error.INTERNAL_ERROR, "Illegal attempt to send a request");
+    }
+
+    @Override
+    H2StreamHandler incomingPushPromise(final H2StreamChannel channel,
+                                        final HandlerFactory<AsyncPushConsumer> pushHandlerFactory) throws IOException {
+        throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "Illegal incoming push promise");
+    }
+
+    @Override
+    H2StreamHandler outgoingPushPromise(final H2StreamChannel channel,
+                                        final AsyncPushProducer pushProducer) throws IOException {
+        final HttpCoreContext context = HttpCoreContext.create();
+        context.setSSLSession(getSSLSession());
+        context.setEndpointDetails(getEndpointDetails());
+        return new ServerPushH2StreamHandler(channel, getHttpProcessor(), getConnMetrics(), pushProducer, context);
+    }
+
+    @Override
+    boolean allowGracefulAbort(final H2Stream stream) {
+        return false;
     }
 
     @Override

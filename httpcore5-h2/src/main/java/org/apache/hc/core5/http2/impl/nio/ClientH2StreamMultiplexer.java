@@ -30,17 +30,18 @@ import java.io.IOException;
 
 import org.apache.hc.core5.annotation.Internal;
 import org.apache.hc.core5.http.config.CharCodingConfig;
-import org.apache.hc.core5.http.impl.BasicHttpConnectionMetrics;
 import org.apache.hc.core5.http.nio.AsyncClientExchangeHandler;
 import org.apache.hc.core5.http.nio.AsyncPushConsumer;
+import org.apache.hc.core5.http.nio.AsyncPushProducer;
 import org.apache.hc.core5.http.nio.HandlerFactory;
-import org.apache.hc.core5.http.nio.command.ExecutableCommand;
-import org.apache.hc.core5.http.nio.command.RequestExecutionCommand;
+import org.apache.hc.core5.http.protocol.HttpContext;
 import org.apache.hc.core5.http.protocol.HttpCoreContext;
 import org.apache.hc.core5.http.protocol.HttpProcessor;
 import org.apache.hc.core5.http2.H2ConnectionException;
 import org.apache.hc.core5.http2.H2Error;
 import org.apache.hc.core5.http2.config.H2Config;
+import org.apache.hc.core5.http2.config.H2Param;
+import org.apache.hc.core5.http2.config.H2Setting;
 import org.apache.hc.core5.http2.frame.DefaultFrameFactory;
 import org.apache.hc.core5.http2.frame.FrameFactory;
 import org.apache.hc.core5.http2.frame.StreamIdGenerator;
@@ -88,12 +89,32 @@ public class ClientH2StreamMultiplexer extends AbstractH2StreamMultiplexer {
     }
 
     @Override
+    void validateSetting(final H2Param param, final int value) throws H2ConnectionException {
+        if (param == H2Param.ENABLE_PUSH && value == 1) {
+            throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "Illegal ENABLE_PUSH setting");
+        }
+    }
+
+    @Override
+    H2Setting[] generateSettings(final H2Config localConfig) {
+        return new H2Setting[] {
+                new H2Setting(H2Param.HEADER_TABLE_SIZE, localConfig.getHeaderTableSize()),
+                new H2Setting(H2Param.ENABLE_PUSH, localConfig.isPushEnabled() ? 1 : 0),
+                new H2Setting(H2Param.MAX_CONCURRENT_STREAMS, localConfig.getMaxConcurrentStreams()),
+                new H2Setting(H2Param.INITIAL_WINDOW_SIZE, localConfig.getInitialWindowSize()),
+                new H2Setting(H2Param.MAX_FRAME_SIZE, localConfig.getMaxFrameSize()),
+                new H2Setting(H2Param.MAX_HEADER_LIST_SIZE, localConfig.getMaxHeaderListSize()),
+                new H2Setting(H2Param.SETTINGS_NO_RFC7540_PRIORITIES, 1)
+        };
+    }
+
+    @Override
     void acceptHeaderFrame() throws H2ConnectionException {
         throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "Illegal HEADERS frame");
     }
 
     @Override
-    void acceptPushFrame() throws H2ConnectionException {
+    void acceptPushFrame() {
     }
 
     @Override
@@ -102,37 +123,43 @@ public class ClientH2StreamMultiplexer extends AbstractH2StreamMultiplexer {
     }
 
     @Override
-    H2StreamHandler createLocallyInitiatedStream(
-            final ExecutableCommand command,
+    H2StreamHandler outgoingRequest(
             final H2StreamChannel channel,
-            final HttpProcessor httpProcessor,
-            final BasicHttpConnectionMetrics connMetrics) throws IOException {
-        if (command instanceof RequestExecutionCommand) {
-            final RequestExecutionCommand executionCommand = (RequestExecutionCommand) command;
-            final AsyncClientExchangeHandler exchangeHandler = executionCommand.getExchangeHandler();
-            final HandlerFactory<AsyncPushConsumer> pushHandlerFactory = executionCommand.getPushHandlerFactory();
-            final HttpCoreContext context = HttpCoreContext.castOrCreate(executionCommand.getContext());
-            context.setSSLSession(getSSLSession());
-            context.setEndpointDetails(getEndpointDetails());
-            return new ClientH2StreamHandler(channel, httpProcessor, connMetrics, exchangeHandler,
-                    pushHandlerFactory != null ? pushHandlerFactory : this.pushHandlerFactory,
-                    context);
-        }
-        throw new H2ConnectionException(H2Error.INTERNAL_ERROR, "Unexpected executable command");
+            final AsyncClientExchangeHandler exchangeHandler,
+            final HandlerFactory<AsyncPushConsumer> pushHandlerFactory,
+            final HttpContext context) {
+        final HttpCoreContext coreContext = HttpCoreContext.castOrCreate(context);
+        coreContext.setSSLSession(getSSLSession());
+        coreContext.setEndpointDetails(getEndpointDetails());
+        return new ClientH2StreamHandler(channel, getHttpProcessor(), getConnMetrics(), exchangeHandler,
+                pushHandlerFactory != null ? pushHandlerFactory : this.pushHandlerFactory,
+                coreContext);
     }
 
     @Override
-    H2StreamHandler createRemotelyInitiatedStream(
-            final H2StreamChannel channel,
-            final HttpProcessor httpProcessor,
-            final BasicHttpConnectionMetrics connMetrics,
-            final HandlerFactory<AsyncPushConsumer> pushHandlerFactory) throws IOException {
+    H2StreamHandler incomingRequest(final H2StreamChannel channel) throws IOException {
+        throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "Illegal incoming request");
+    }
+
+    @Override
+    H2StreamHandler outgoingPushPromise(final H2StreamChannel channel, final AsyncPushProducer pushProducer) throws IOException {
+        throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "Illegal attempt to send push promise");
+    }
+
+    @Override
+    H2StreamHandler incomingPushPromise(final H2StreamChannel channel,
+                                        final HandlerFactory<AsyncPushConsumer> pushHandlerFactory) {
         final HttpCoreContext context = HttpCoreContext.create();
         context.setSSLSession(getSSLSession());
         context.setEndpointDetails(getEndpointDetails());
-        return new ClientPushH2StreamHandler(channel, httpProcessor, connMetrics,
+        return new ClientPushH2StreamHandler(channel, getHttpProcessor(), getConnMetrics(),
                 pushHandlerFactory != null ? pushHandlerFactory : this.pushHandlerFactory,
                 context);
+    }
+
+    @Override
+    boolean allowGracefulAbort(final H2Stream stream) {
+        return stream.isRemoteClosed() && !stream.isLocalClosed();
     }
 
     @Override

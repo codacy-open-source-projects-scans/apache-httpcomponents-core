@@ -53,6 +53,7 @@ public class HttpAsyncServerResource implements AfterEachCallback {
 
     public HttpAsyncServerResource() {
         this.bootstrap = AsyncServerBootstrap.bootstrap()
+                .setCanonicalHostName("localhost")
                 .setStreamListener(LoggingHttp1StreamListener.INSTANCE_SERVER)
                 .setIOSessionDecorator(LoggingIOSessionDecorator.INSTANCE)
                 .setExceptionCallback(LoggingExceptionCallback.INSTANCE)
@@ -69,7 +70,7 @@ public class HttpAsyncServerResource implements AfterEachCallback {
         LOG.debug("Shutting down test server");
         if (server != null) {
             try {
-                server.close(CloseMode.IMMEDIATE);
+                server.close(CloseMode.GRACEFUL);
             } catch (final Exception ignore) {
             }
         }

@@ -38,6 +38,8 @@ import javax.net.ssl.SSLSession;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 
+import jdk.net.ExtendedSocketOptions;
+import jdk.net.Sockets;
 import org.apache.hc.core5.function.Callback;
 import org.apache.hc.core5.http.ExceptionListener;
 import org.apache.hc.core5.http.impl.io.HttpService;
@@ -45,7 +47,7 @@ import org.apache.hc.core5.http.io.HttpConnectionFactory;
 import org.apache.hc.core5.http.io.HttpServerConnection;
 import org.apache.hc.core5.http.io.SocketConfig;
 import org.apache.hc.core5.io.Closer;
-import org.apache.hc.core5.io.SocketSupport;
+import org.apache.hc.core5.util.ReflectionUtils;
 
 class RequestListener implements Runnable {
 
@@ -79,6 +81,7 @@ class RequestListener implements Runnable {
         this.terminated = new AtomicBoolean();
     }
 
+    @SuppressWarnings("Since15")
     private HttpServerConnection createConnection(final Socket socket) throws IOException {
         socket.setSoTimeout(this.socketConfig.getSoTimeout().toMillisecondsIntBound());
         socket.setKeepAlive(this.socketConfig.isSoKeepAlive());
@@ -92,14 +95,16 @@ class RequestListener implements Runnable {
         if (this.socketConfig.getSoLinger().toSeconds() >= 0) {
             socket.setSoLinger(true, this.socketConfig.getSoLinger().toSecondsIntBound());
         }
-        if (this.socketConfig.getTcpKeepIdle() > 0) {
-            SocketSupport.setOption(this.serverSocket, SocketSupport.TCP_KEEPIDLE, this.socketConfig.getTcpKeepIdle());
-        }
-        if (this.socketConfig.getTcpKeepInterval() > 0) {
-            SocketSupport.setOption(this.serverSocket, SocketSupport.TCP_KEEPINTERVAL, this.socketConfig.getTcpKeepInterval());
-        }
-        if (this.socketConfig.getTcpKeepCount() > 0) {
-            SocketSupport.setOption(this.serverSocket, SocketSupport.TCP_KEEPCOUNT, this.socketConfig.getTcpKeepCount());
+        if (ReflectionUtils.supportsKeepAliveOptions()) {
+            if (this.socketConfig.getTcpKeepIdle() > 0) {
+                Sockets.setOption(this.serverSocket, ExtendedSocketOptions.TCP_KEEPIDLE, this.socketConfig.getTcpKeepIdle());
+            }
+            if (this.socketConfig.getTcpKeepInterval() > 0) {
+                Sockets.setOption(this.serverSocket, ExtendedSocketOptions.TCP_KEEPINTERVAL, this.socketConfig.getTcpKeepInterval());
+            }
+            if (this.socketConfig.getTcpKeepCount() > 0) {
+                Sockets.setOption(this.serverSocket, ExtendedSocketOptions.TCP_KEEPCOUNT, this.socketConfig.getTcpKeepCount());
+            }
         }
         if (!(socket instanceof SSLSocket) && sslSocketFactory != null) {
             final SSLSocket sslSocket = (SSLSocket) sslSocketFactory.createSocket(socket, null, -1, false);
@@ -135,7 +140,7 @@ class RequestListener implements Runnable {
                     this.executorService.execute(worker);
                 } catch (final IOException | RuntimeException ex) {
                     Closer.closeQuietly(socket);
-                    throw ex;
+                    this.exceptionListener.onError(ex);
                 }
             }
         } catch (final Exception ex) {

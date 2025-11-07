@@ -124,17 +124,16 @@ public final class TextUtils {
      *
      * @since 5.0
      */
+    private static final char[] HEX_CHARS = { '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd',
+            'e', 'f' };
+
     public static String toHexString(final byte[] bytes) {
         if (bytes == null) {
             return null;
         }
         final StringBuilder buffer = new StringBuilder(bytes.length * 2);
-        for (final byte element : bytes) {
-            final int unsignedB = element & 0xff;
-            if (unsignedB < 16) {
-                buffer.append('0');
-            }
-            buffer.append(Integer.toHexString(unsignedB));
+        for (final byte b : bytes) {
+            buffer.append(HEX_CHARS[(0xf0 & b) >>> 4]).append(HEX_CHARS[0x0f & b]);
         }
         return buffer.toString();
     }
@@ -188,5 +187,22 @@ public final class TextUtils {
         }
         return '?';
     }
+
+    /**
+     * Tests whether the given character is an ASCII hexadecimal digit.
+     * <p>
+     * Accepts {@code '0'..'9'}, {@code 'A'..'F'}, and {@code 'a'..'f'} only.
+     * This method does not consider non-ASCII numerals or fullwidth forms.
+     *
+     * @param c the character to test
+     * @return {@code true} if {@code c} is an ASCII hex digit, {@code false} otherwise
+     * @since 5.4
+     */
+    public static boolean isHex(final char c) {
+        return c >= '0' && c <= '9'
+                || c >= 'A' && c <= 'F'
+                || c >= 'a' && c <= 'f';
+    }
+
 
 }

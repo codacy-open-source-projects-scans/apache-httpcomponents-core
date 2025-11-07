@@ -31,7 +31,7 @@ import java.net.SocketAddress;
 import java.nio.BufferOverflowException;
 import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
-import java.nio.charset.CharacterCodingException;
+import java.nio.charset.StandardCharsets;
 import java.util.Deque;
 import java.util.Iterator;
 import java.util.List;
@@ -41,6 +41,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 
 import javax.net.ssl.SSLHandshakeException;
 import javax.net.ssl.SSLSession;
@@ -51,6 +52,7 @@ import org.apache.hc.core5.http.EndpointDetails;
 import org.apache.hc.core5.http.Header;
 import org.apache.hc.core5.http.HttpConnection;
 import org.apache.hc.core5.http.HttpException;
+import org.apache.hc.core5.http.HttpHeaders;
 import org.apache.hc.core5.http.HttpStreamResetException;
 import org.apache.hc.core5.http.HttpVersion;
 import org.apache.hc.core5.http.ProtocolException;
@@ -60,12 +62,15 @@ import org.apache.hc.core5.http.config.CharCodingConfig;
 import org.apache.hc.core5.http.impl.BasicEndpointDetails;
 import org.apache.hc.core5.http.impl.BasicHttpConnectionMetrics;
 import org.apache.hc.core5.http.impl.CharCodingSupport;
+import org.apache.hc.core5.http.nio.AsyncClientExchangeHandler;
 import org.apache.hc.core5.http.nio.AsyncPushConsumer;
 import org.apache.hc.core5.http.nio.AsyncPushProducer;
 import org.apache.hc.core5.http.nio.HandlerFactory;
-import org.apache.hc.core5.http.nio.command.ExecutableCommand;
+import org.apache.hc.core5.http.nio.command.CommandSupport;
+import org.apache.hc.core5.http.nio.command.RequestExecutionCommand;
 import org.apache.hc.core5.http.nio.command.ShutdownCommand;
-import org.apache.hc.core5.http.protocol.HttpCoreContext;
+import org.apache.hc.core5.http.nio.command.StaleCheckCommand;
+import org.apache.hc.core5.http.protocol.HttpContext;
 import org.apache.hc.core5.http.protocol.HttpProcessor;
 import org.apache.hc.core5.http2.H2ConnectionException;
 import org.apache.hc.core5.http2.H2Error;
@@ -83,6 +88,9 @@ import org.apache.hc.core5.http2.hpack.HPackEncoder;
 import org.apache.hc.core5.http2.impl.BasicH2TransportMetrics;
 import org.apache.hc.core5.http2.nio.AsyncPingHandler;
 import org.apache.hc.core5.http2.nio.command.PingCommand;
+import org.apache.hc.core5.http2.nio.command.PushResponseCommand;
+import org.apache.hc.core5.http2.priority.PriorityParamsParser;
+import org.apache.hc.core5.http2.priority.PriorityValue;
 import org.apache.hc.core5.io.CloseMode;
 import org.apache.hc.core5.reactor.Command;
 import org.apache.hc.core5.reactor.ProtocolIOSession;
@@ -94,15 +102,13 @@ import org.apache.hc.core5.util.Timeout;
 
 abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnection {
 
-    private static final long LINGER_TIME = 1000; // 1 second
-    private static final long CONNECTION_WINDOW_LOW_MARK = 10 * 1024 * 1024; // 10 MiB
+    private static final long CONNECTION_WINDOW_LOW_MARK = 10 * 1024 * 1024;
 
     enum ConnectionHandshake { READY, ACTIVE, GRACEFUL_SHUTDOWN, SHUTDOWN }
     enum SettingsHandshake { READY, TRANSMITTED, ACKED }
 
     private final ProtocolIOSession ioSession;
     private final FrameFactory frameFactory;
-    private final StreamIdGenerator idGenerator;
     private final HttpProcessor httpProcessor;
     private final H2Config localConfig;
     private final BasicH2TransportMetrics inputMetrics;
@@ -113,12 +119,11 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
     private final Deque<RawFrame> outputQueue;
     private final HPackEncoder hPackEncoder;
     private final HPackDecoder hPackDecoder;
-    private final Map<Integer, H2Stream> streamMap;
+    private final H2Streams streams;
     private final Queue<AsyncPingHandler> pingHandlers;
     private final AtomicInteger connInputWindow;
     private final AtomicInteger connOutputWindow;
     private final AtomicInteger outputRequests;
-    private final AtomicInteger lastStreamId;
     private final H2StreamListener streamListener;
 
     private ConnectionHandshake connState = ConnectionHandshake.READY;
@@ -133,9 +138,11 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
 
     private Continuation continuation;
 
-    private int processedRemoteStreamId;
     private EndpointDetails endpointDetails;
     private boolean goAwayReceived;
+
+    private final Map<Integer, PriorityValue> priorities = new ConcurrentHashMap<>();
+    private volatile boolean peerNoRfc7540Priorities;
 
     AbstractH2StreamMultiplexer(
             final ProtocolIOSession ioSession,
@@ -147,8 +154,8 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
             final H2StreamListener streamListener) {
         this.ioSession = Args.notNull(ioSession, "IO session");
         this.frameFactory = Args.notNull(frameFactory, "Frame factory");
-        this.idGenerator = Args.notNull(idGenerator, "Stream id generator");
         this.httpProcessor = Args.notNull(httpProcessor, "HTTP processor");
+        this.streams = new H2Streams(idGenerator);
         this.localConfig = h2Config != null ? h2Config : H2Config.DEFAULT;
         this.inputMetrics = new BasicH2TransportMetrics();
         this.outputMetrics = new BasicH2TransportMetrics();
@@ -158,10 +165,8 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
         this.outputQueue = new ConcurrentLinkedDeque<>();
         this.pingHandlers = new ConcurrentLinkedQueue<>();
         this.outputRequests = new AtomicInteger(0);
-        this.lastStreamId = new AtomicInteger(0);
         this.hPackEncoder = new HPackEncoder(H2Config.INIT.getHeaderTableSize(), CharCodingSupport.createEncoder(charCodingConfig));
         this.hPackDecoder = new HPackDecoder(H2Config.INIT.getHeaderTableSize(), CharCodingSupport.createDecoder(charCodingConfig));
-        this.streamMap = new ConcurrentHashMap<>();
         this.remoteConfig = H2Config.INIT;
         this.connInputWindow = new AtomicInteger(H2Config.INIT.getInitialWindowSize());
         this.connOutputWindow = new AtomicInteger(H2Config.INIT.getInitialWindowSize());
@@ -180,23 +185,42 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
         return ioSession.getId();
     }
 
+    BasicHttpConnectionMetrics getConnMetrics() {
+        return connMetrics;
+    }
+
+    HttpProcessor getHttpProcessor() {
+        return httpProcessor;
+    }
+
+    void submitCommand(final Command command) {
+        ioSession.enqueue(command, Command.Priority.NORMAL);
+    }
+
+    abstract void validateSetting(H2Param param, int value) throws H2ConnectionException;
+
+    abstract H2Setting[] generateSettings(H2Config localConfig);
+
     abstract void acceptHeaderFrame() throws H2ConnectionException;
 
     abstract void acceptPushRequest() throws H2ConnectionException;
 
     abstract void acceptPushFrame() throws H2ConnectionException;
 
-    abstract H2StreamHandler createRemotelyInitiatedStream(
-            H2StreamChannel channel,
-            HttpProcessor httpProcessor,
-            BasicHttpConnectionMetrics connMetrics,
-            HandlerFactory<AsyncPushConsumer> pushHandlerFactory) throws IOException;
+    abstract H2StreamHandler incomingRequest(H2StreamChannel channel) throws IOException;
 
-    abstract H2StreamHandler createLocallyInitiatedStream(
-            ExecutableCommand command,
-            H2StreamChannel channel,
-            HttpProcessor httpProcessor,
-            BasicHttpConnectionMetrics connMetrics) throws IOException;
+    abstract H2StreamHandler incomingPushPromise(H2StreamChannel channel,
+                                                 HandlerFactory<AsyncPushConsumer> pushHandlerFactory) throws IOException;
+
+    abstract H2StreamHandler outgoingRequest(H2StreamChannel channel,
+                                             AsyncClientExchangeHandler exchangeHandler,
+                                             HandlerFactory<AsyncPushConsumer> pushHandlerFactory,
+                                             HttpContext context) throws IOException;
+
+    abstract H2StreamHandler outgoingPushPromise(H2StreamChannel channel,
+                                                 AsyncPushProducer pushProducer) throws IOException;
+
+    abstract boolean allowGracefulAbort(H2Stream stream);
 
     private int updateWindow(final AtomicInteger window, final int delta) throws ArithmeticException {
         for (;;) {
@@ -207,6 +231,15 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
             }
             if (window.compareAndSet(current, (int) newValue)) {
                 return (int) newValue;
+            }
+        }
+    }
+
+    private int updateWindowMax(final AtomicInteger window) throws ArithmeticException {
+        for (;;) {
+            final int current = window.get();
+            if (window.compareAndSet(current, Integer.MAX_VALUE)) {
+                return Integer.MAX_VALUE - current;
             }
         }
     }
@@ -371,48 +404,25 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
             final int remainingCapacity = Integer.MAX_VALUE - streamWinSize;
             final int chunk = Math.min(inputCapacity, remainingCapacity);
             if (chunk != 0) {
+                updateInputWindow(streamId, inputWindow, chunk);
                 final RawFrame windowUpdateFrame = frameFactory.createWindowUpdate(streamId, chunk);
                 commitFrame(windowUpdateFrame);
-                updateInputWindow(streamId, inputWindow, chunk);
             }
         }
     }
 
-    private void requestSessionOutput() {
+    void requestSessionOutput() {
         outputRequests.incrementAndGet();
         ioSession.setEvent(SelectionKey.OP_WRITE);
     }
 
-    private void updateLastStreamId(final int streamId) {
-        final int currentId = lastStreamId.get();
-        if (streamId > currentId) {
-            lastStreamId.compareAndSet(currentId, streamId);
-        }
-    }
-
-    private int generateStreamId() {
-        for (;;) {
-            final int currentId = lastStreamId.get();
-            final int newStreamId = idGenerator.generate(currentId);
-            if (lastStreamId.compareAndSet(currentId, newStreamId)) {
-                return newStreamId;
-            }
-        }
-    }
-
     public final void onConnect() throws HttpException, IOException {
         connState = ConnectionHandshake.ACTIVE;
-        final RawFrame settingsFrame = frameFactory.createSettings(
-                new H2Setting(H2Param.HEADER_TABLE_SIZE, localConfig.getHeaderTableSize()),
-                new H2Setting(H2Param.ENABLE_PUSH, localConfig.isPushEnabled() ? 1 : 0),
-                new H2Setting(H2Param.MAX_CONCURRENT_STREAMS, localConfig.getMaxConcurrentStreams()),
-                new H2Setting(H2Param.INITIAL_WINDOW_SIZE, localConfig.getInitialWindowSize()),
-                new H2Setting(H2Param.MAX_FRAME_SIZE, localConfig.getMaxFrameSize()),
-                new H2Setting(H2Param.MAX_HEADER_LIST_SIZE, localConfig.getMaxHeaderListSize()));
+        final RawFrame settingsFrame = frameFactory.createSettings(generateSettings(localConfig));
 
         commitFrame(settingsFrame);
         localSettingState = SettingsHandshake.TRANSMITTED;
-        maximizeConnWindow(connInputWindow.get());
+        maximizeWindow(0, connInputWindow);
 
         if (streamListener != null) {
             final int initInputWindow = connInputWindow.get();
@@ -428,13 +438,22 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
         } else {
             for (;;) {
                 final RawFrame frame = inputBuffer.read(src, ioSession);
-                if (frame == null) {
+                if (frame != null) {
+                    if (streamListener != null) {
+                        streamListener.onFrameInput(this, frame.getStreamId(), frame);
+                    }
+                    consumeFrame(frame);
+                } else {
+                    if (inputBuffer.isEndOfStream()) {
+                        if (connState == ConnectionHandshake.ACTIVE) {
+                            final RawFrame goAway = frameFactory.createGoAway(streams.getLastRemoteId(), H2Error.NO_ERROR, "Unexpected end of stream");
+                            commitFrame(goAway);
+                        }
+                        connState = ConnectionHandshake.SHUTDOWN;
+                        requestSessionOutput();
+                    }
                     break;
                 }
-                if (streamListener != null) {
-                    streamListener.onFrameInput(this, frame.getStreamId(), frame);
-                }
-                consumeFrame(frame);
             }
         }
     }
@@ -467,10 +486,9 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
             }
             final int pendingOutputRequests = outputRequests.get();
             boolean outputPending = false;
-            if (!streamMap.isEmpty() && connOutputWindow.get() > 0) {
-                for (final Iterator<Map.Entry<Integer, H2Stream>> it = streamMap.entrySet().iterator(); it.hasNext(); ) {
-                    final Map.Entry<Integer, H2Stream> entry = it.next();
-                    final H2Stream stream = entry.getValue();
+            if (!streams.isEmpty() && connOutputWindow.get() > 0) {
+                for (final Iterator<H2Stream> it = streams.iterator(); it.hasNext(); ) {
+                    final H2Stream stream = it.next();
                     if (!stream.isLocalClosed()
                             && stream.getOutputWindow().get() > 0
                             && stream.isOutputReady()) {
@@ -493,18 +511,36 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
         }
 
         if (connState.compareTo(ConnectionHandshake.ACTIVE) <= 0 && remoteSettingState == SettingsHandshake.ACKED) {
-            processPendingCommands();
+            while (streams.getLocalCount() < remoteConfig.getMaxConcurrentStreams()) {
+                final Command command = ioSession.poll();
+                if (command == null) {
+                    break;
+                }
+                if (command instanceof ShutdownCommand) {
+                    executeShutdown((ShutdownCommand) command);
+                } else if (command instanceof PingCommand) {
+                    executePing((PingCommand) command);
+                } else if (command instanceof RequestExecutionCommand) {
+                    executeRequest((RequestExecutionCommand) command);
+                } else if (command instanceof PushResponseCommand) {
+                    executePush((PushResponseCommand) command);
+                } else if (command instanceof StaleCheckCommand) {
+                    executeStaleCheck((StaleCheckCommand) command);
+                }
+                if (!outputQueue.isEmpty()) {
+                    return;
+                }
+            }
         }
         if (connState.compareTo(ConnectionHandshake.GRACEFUL_SHUTDOWN) == 0) {
             int liveStreams = 0;
-            for (final Iterator<Map.Entry<Integer, H2Stream>> it = streamMap.entrySet().iterator(); it.hasNext(); ) {
-                final Map.Entry<Integer, H2Stream> entry = it.next();
-                final H2Stream stream = entry.getValue();
-                if (stream.isLocalClosed() && stream.isRemoteClosed()) {
-                    stream.releaseResources();
+            for (final Iterator<H2Stream> it = streams.iterator(); it.hasNext(); ) {
+                final H2Stream stream = it.next();
+                if (stream.isClosedPastLingerDeadline()) {
+                    streams.dropStreamId(stream.getId());
                     it.remove();
                 } else {
-                    if (idGenerator.isSameSide(stream.getId()) || stream.getId() <= processedRemoteStreamId) {
+                    if (streams.isSameSide(stream.getId()) || stream.getId() <= streams.getLastRemoteId()) {
                         liveStreams++;
                     }
                 }
@@ -513,13 +549,24 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                 connState = ConnectionHandshake.SHUTDOWN;
             }
         }
-        if (connState.compareTo(ConnectionHandshake.SHUTDOWN) >= 0) {
-            if (!streamMap.isEmpty()) {
-                for (final H2Stream stream : streamMap.values()) {
-                    stream.releaseResources();
+        if (connState.compareTo(ConnectionHandshake.GRACEFUL_SHUTDOWN) >= 0) {
+            for (;;) {
+                final Command command = ioSession.poll();
+                if (command == null) {
+                    break;
                 }
-                streamMap.clear();
+                if (command instanceof ShutdownCommand) {
+                    final ShutdownCommand shutdownCommand = (ShutdownCommand) command;
+                    if (shutdownCommand.getType() == CloseMode.IMMEDIATE) {
+                        connState = ConnectionHandshake.SHUTDOWN;
+                    }
+                } else {
+                    command.cancel();
+                }
             }
+        }
+        if (connState.compareTo(ConnectionHandshake.SHUTDOWN) >= 0) {
+            streams.shutdownAndReleaseAll();
             ioSession.getLock().lock();
             try {
                 if (outputBuffer.isEmpty() && outputQueue.isEmpty()) {
@@ -536,19 +583,18 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
 
         final RawFrame goAway;
         if (localSettingState != SettingsHandshake.ACKED) {
-            goAway = frameFactory.createGoAway(processedRemoteStreamId, H2Error.SETTINGS_TIMEOUT,
-                            "Setting timeout (" + timeout + ")");
+            goAway = frameFactory.createGoAway(streams.getLastRemoteId(), H2Error.SETTINGS_TIMEOUT,
+                    "Setting timeout (" + timeout + ")");
         } else {
-            goAway = frameFactory.createGoAway(processedRemoteStreamId, H2Error.NO_ERROR,
-                            "Timeout due to inactivity (" + timeout + ")");
+            goAway = frameFactory.createGoAway(streams.getLastRemoteId(), H2Error.NO_ERROR,
+                    "Timeout due to inactivity (" + timeout + ")");
         }
         commitFrame(goAway);
-        for (final Iterator<Map.Entry<Integer, H2Stream>> it = streamMap.entrySet().iterator(); it.hasNext(); ) {
-            final Map.Entry<Integer, H2Stream> entry = it.next();
-            final H2Stream stream = entry.getValue();
-            stream.reset(new H2StreamResetException(H2Error.NO_ERROR, "Timeout due to inactivity (" + timeout + ")"));
+        for (final Iterator<H2Stream> it = streams.iterator(); it.hasNext(); ) {
+            final H2Stream stream = it.next();
+            stream.fail(new H2StreamResetException(H2Error.NO_ERROR, "Timeout due to inactivity (" + timeout + ")"));
         }
-        streamMap.clear();
+        streams.shutdownAndReleaseAll();
     }
 
     public final void onDisconnect() {
@@ -560,83 +606,73 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                 break;
             }
         }
-        for (final Iterator<Map.Entry<Integer, H2Stream>> it = streamMap.entrySet().iterator(); it.hasNext(); ) {
-            final Map.Entry<Integer, H2Stream> entry = it.next();
-            final H2Stream stream = entry.getValue();
-            stream.cancel();
-        }
-        for (;;) {
-            final Command command = ioSession.poll();
-            if (command != null) {
-                if (command instanceof ExecutableCommand) {
-                    ((ExecutableCommand) command).failed(new ConnectionClosedException());
-                } else {
-                    command.cancel();
-                }
-            } else {
-                break;
+        streams.shutdownAndReleaseAll();
+        CommandSupport.cancelCommands(ioSession);
+    }
+
+    private void executeShutdown(final ShutdownCommand shutdownCommand) throws IOException {
+        if (shutdownCommand.getType() == CloseMode.IMMEDIATE) {
+            streams.shutdownAndReleaseAll();
+            connState = ConnectionHandshake.SHUTDOWN;
+        } else {
+            if (connState.compareTo(ConnectionHandshake.ACTIVE) <= 0) {
+                final RawFrame goAway = frameFactory.createGoAway(streams.getLastRemoteId(), H2Error.NO_ERROR, "Graceful shutdown");
+                commitFrame(goAway);
+                connState = streams.isEmpty() ? ConnectionHandshake.SHUTDOWN : ConnectionHandshake.GRACEFUL_SHUTDOWN;
             }
         }
     }
 
-    private void processPendingCommands() throws IOException, HttpException {
-        while (streamMap.size() < remoteConfig.getMaxConcurrentStreams()) {
-            final Command command = ioSession.poll();
-            if (command == null) {
-                break;
-            }
-            if (command instanceof ShutdownCommand) {
-                final ShutdownCommand shutdownCommand = (ShutdownCommand) command;
-                if (shutdownCommand.getType() == CloseMode.IMMEDIATE) {
-                    for (final Iterator<Map.Entry<Integer, H2Stream>> it = streamMap.entrySet().iterator(); it.hasNext(); ) {
-                        final Map.Entry<Integer, H2Stream> entry = it.next();
-                        final H2Stream stream = entry.getValue();
-                        stream.cancel();
-                    }
-                    streamMap.clear();
-                    connState = ConnectionHandshake.SHUTDOWN;
-                } else {
-                    if (connState.compareTo(ConnectionHandshake.ACTIVE) <= 0) {
-                        final RawFrame goAway = frameFactory.createGoAway(processedRemoteStreamId, H2Error.NO_ERROR, "Graceful shutdown");
-                        commitFrame(goAway);
-                        connState = streamMap.isEmpty() ? ConnectionHandshake.SHUTDOWN : ConnectionHandshake.GRACEFUL_SHUTDOWN;
-                    }
-                }
-                break;
-            } else if (command instanceof PingCommand) {
-                final PingCommand pingCommand = (PingCommand) command;
-                final AsyncPingHandler handler = pingCommand.getHandler();
-                pingHandlers.add(handler);
-                final RawFrame ping = frameFactory.createPing(handler.getData());
-                commitFrame(ping);
-            } else if (command instanceof ExecutableCommand) {
-                final int streamId = generateStreamId();
-                final H2StreamChannelImpl channel = new H2StreamChannelImpl(
-                        streamId, true, initInputWinSize, initOutputWinSize);
-                final ExecutableCommand executableCommand = (ExecutableCommand) command;
-                final H2StreamHandler streamHandler = createLocallyInitiatedStream(
-                        executableCommand, channel, httpProcessor, connMetrics);
+    private void executePing(final PingCommand pingCommand) throws IOException {
+        final AsyncPingHandler handler = pingCommand.getHandler();
+        pingHandlers.add(handler);
+        final RawFrame ping = frameFactory.createPing(handler.getData());
+        commitFrame(ping);
+    }
 
-                final H2Stream stream = new H2Stream(channel, streamHandler, false);
-                streamMap.put(streamId, stream);
+    private void executeStaleCheck(final StaleCheckCommand staleCheckCommand) {
+        final Consumer<Boolean> callback = staleCheckCommand.getCallback();
+        callback.accept(ioSession.isOpen() &&
+                connState.compareTo(ConnectionHandshake.ACTIVE) == 0);
+    }
 
-                if (streamListener != null) {
-                    final int initInputWindow = stream.getInputWindow().get();
-                    streamListener.onInputFlowControl(this, streamId, initInputWindow, initInputWindow);
-                    final int initOutputWindow = stream.getOutputWindow().get();
-                    streamListener.onOutputFlowControl(this, streamId, initOutputWindow, initOutputWindow);
-                }
+    private void executeRequest(final RequestExecutionCommand requestExecutionCommand) throws IOException, HttpException {
+        final int streamId = streams.generateStreamId();
+        final H2StreamChannel channel = createChannel(streamId);
+        final H2Stream stream = streams.createActive(channel, outgoingRequest(channel,
+                requestExecutionCommand.getExchangeHandler(),
+                requestExecutionCommand.getPushHandlerFactory(),
+                requestExecutionCommand.getContext()));
 
+        if (streamListener != null) {
+            final int initInputWindow = stream.getInputWindow().get();
+            streamListener.onInputFlowControl(this, streamId, initInputWindow, initInputWindow);
+            final int initOutputWindow = stream.getOutputWindow().get();
+            streamListener.onOutputFlowControl(this, streamId, initOutputWindow, initOutputWindow);
+        }
+
+        if (stream.isOutputReady()) {
+            stream.produceOutput();
+        }
+        final CancellableDependency cancellableDependency = requestExecutionCommand.getCancellableDependency();
+        if (cancellableDependency != null) {
+            cancellableDependency.setDependency(stream::abort);
+        }
+    }
+
+    private void executePush(final PushResponseCommand pushResponseCommand) throws IOException, HttpException {
+        if (pushResponseCommand.isCancelled()) {
+            return;
+        }
+        final H2Stream stream = streams.lookupSeen(pushResponseCommand.getStreamId());
+        if (stream != null && stream.isReserved()) {
+            if (!stream.isLocalClosed()) {
+                stream.activate();
                 if (stream.isOutputReady()) {
                     stream.produceOutput();
                 }
-                final CancellableDependency cancellableDependency = executableCommand.getCancellableDependency();
-                if (cancellableDependency != null) {
-                    cancellableDependency.setDependency(stream::abort);
-                }
-                if (!outputQueue.isEmpty()) {
-                    return;
-                }
+            } else {
+                stream.abort();
             }
         }
     }
@@ -651,24 +687,10 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                     break;
                 }
             }
-            for (;;) {
-                final Command command = ioSession.poll();
-                if (command != null) {
-                    if (command instanceof ExecutableCommand) {
-                        ((ExecutableCommand) command).failed(new ConnectionClosedException());
-                    } else {
-                        command.cancel();
-                    }
-                } else {
-                    break;
-                }
-            }
-            for (final Iterator<Map.Entry<Integer, H2Stream>> it = streamMap.entrySet().iterator(); it.hasNext(); ) {
-                final Map.Entry<Integer, H2Stream> entry = it.next();
-                final H2Stream stream = entry.getValue();
-                stream.reset(cause);
-            }
-            streamMap.clear();
+
+            CommandSupport.cancelCommands(ioSession);
+            streams.shutdownAndReleaseAll();
+
             if (!(cause instanceof ConnectionClosedException)) {
                 if (connState.compareTo(ConnectionHandshake.GRACEFUL_SHUTDOWN) <= 0) {
                     final H2Error errorCode;
@@ -679,7 +701,7 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                     } else {
                         errorCode = H2Error.INTERNAL_ERROR;
                     }
-                    final RawFrame goAway = frameFactory.createGoAway(processedRemoteStreamId, errorCode, cause.getMessage());
+                    final RawFrame goAway = frameFactory.createGoAway(streams.getLastRemoteId(), errorCode, cause.getMessage());
                     commitFrame(goAway);
                 }
             }
@@ -700,21 +722,6 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
         }
     }
 
-    private H2Stream getValidStream(final int streamId) throws H2ConnectionException {
-        if (streamId == 0) {
-            throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "Illegal stream id: " + streamId);
-        }
-        final H2Stream stream = streamMap.get(streamId);
-        if (stream == null) {
-            if (streamId <= lastStreamId.get()) {
-                throw new H2ConnectionException(H2Error.STREAM_CLOSED, "Stream closed");
-            } else {
-                throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "Unexpected stream id: " + streamId);
-            }
-        }
-        return stream;
-    }
-
     private void consumeFrame(final RawFrame frame) throws HttpException, IOException {
         final FrameType frameType = FrameType.valueOf(frame.getType());
         final int streamId = frame.getStreamId();
@@ -723,7 +730,10 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
         }
         switch (frameType) {
             case DATA: {
-                final H2Stream stream = getValidStream(streamId);
+                if (streamId == 0) {
+                    throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "Illegal stream id: " + streamId);
+                }
+                final H2Stream stream = streams.lookupValid(streamId);
                 try {
                     consumeDataFrame(frame, stream);
                 } catch (final H2StreamResetException ex) {
@@ -732,8 +742,7 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                     stream.localReset(ex, ex.getCause() != null ? H2Error.INTERNAL_ERROR : H2Error.CANCEL);
                 }
 
-                if (stream.isTerminated()) {
-                    streamMap.remove(streamId);
+                if (stream.isClosed()) {
                     stream.releaseResources();
                     requestSessionOutput();
                 }
@@ -743,39 +752,32 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                 if (streamId == 0) {
                     throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "Illegal stream id: " + streamId);
                 }
-                H2Stream stream = streamMap.get(streamId);
+                H2Stream stream = streams.lookupValidOrNull(streamId);
                 if (stream == null) {
                     acceptHeaderFrame();
-
-                    if (idGenerator.isSameSide(streamId)) {
+                    if (streams.isSameSide(streamId)) {
                         throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "Illegal stream id: " + streamId);
                     }
                     if (goAwayReceived ) {
                         throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "GOAWAY received");
                     }
 
-                    updateLastStreamId(streamId);
-
-                    final H2StreamChannelImpl channel = new H2StreamChannelImpl(
-                            streamId, false, initInputWinSize, initOutputWinSize);
-                    final H2StreamHandler streamHandler;
+                    final H2StreamChannel channel = createChannel(streamId);
                     if (connState.compareTo(ConnectionHandshake.ACTIVE) <= 0) {
-                        streamHandler = createRemotelyInitiatedStream(channel, httpProcessor, connMetrics, null);
+                        stream = streams.createActive(channel, incomingRequest(channel));
+                        streams.resetIfExceedsMaxConcurrentLimit(stream, localConfig.getMaxConcurrentStreams());
                     } else {
-                        streamHandler = NoopH2StreamHandler.INSTANCE;
-                        channel.setLocalEndStream();
+                        channel.localReset(H2Error.REFUSED_STREAM);
+                        stream = streams.createActive(channel, NoopH2StreamHandler.INSTANCE);
                     }
-
-                    stream = new H2Stream(channel, streamHandler, true);
-                    if (stream.isOutputReady()) {
-                        stream.produceOutput();
-                    }
-                    streamMap.put(streamId, stream);
+                } else if (stream.isLocalClosed() && stream.isRemoteClosed()) {
+                    throw new H2ConnectionException(H2Error.STREAM_CLOSED, "Stream closed");
+                } else if (stream.isReserved()) {
+                    stream.activate();
+                    streams.resetIfExceedsMaxConcurrentLimit(stream, localConfig.getMaxConcurrentStreams());
                 }
-
                 try {
                     consumeHeaderFrame(frame, stream);
-
                     if (stream.isOutputReady()) {
                         stream.produceOutput();
                     }
@@ -787,14 +789,16 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                     stream.handle(ex);
                 }
 
-                if (stream.isTerminated()) {
-                    streamMap.remove(streamId);
+                if (stream.isClosed()) {
                     stream.releaseResources();
                     requestSessionOutput();
                 }
             }
             break;
             case CONTINUATION: {
+                if (streamId == 0) {
+                    throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "Illegal stream id: " + streamId);
+                }
                 if (continuation == null) {
                     throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "Unexpected CONTINUATION frame");
                 }
@@ -802,9 +806,8 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                     throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "Unexpected CONTINUATION stream id: " + streamId);
                 }
 
-                final H2Stream stream = getValidStream(streamId);
+                final H2Stream stream = streams.lookupValid(streamId);
                 try {
-
                     consumeContinuationFrame(frame, stream);
                 } catch (final H2StreamResetException ex) {
                     stream.localReset(ex);
@@ -812,8 +815,7 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                     stream.localReset(ex, ex.getCause() != null ? H2Error.INTERNAL_ERROR : H2Error.CANCEL);
                 }
 
-                if (stream.isTerminated()) {
-                    streamMap.remove(streamId);
+                if (stream.isClosed()) {
                     stream.releaseResources();
                     requestSessionOutput();
                 }
@@ -835,7 +837,7 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                         throw new H2ConnectionException(H2Error.FLOW_CONTROL_ERROR, ex.getMessage());
                     }
                 } else {
-                    final H2Stream stream = streamMap.get(streamId);
+                    final H2Stream stream = streams.lookup(streamId);
                     if (stream != null) {
                         try {
                             updateOutputWindow(streamId, stream.getOutputWindow(), delta);
@@ -851,21 +853,20 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                 if (streamId == 0) {
                     throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "Illegal stream id: " + streamId);
                 }
-                final H2Stream stream = streamMap.get(streamId);
-                if (stream == null) {
-                    if (streamId > lastStreamId.get()) {
-                        throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "Unexpected stream id: " + streamId);
-                    }
-                } else {
+                final H2Stream stream = streams.lookupSeen(streamId);
+                if (stream != null) {
                     final ByteBuffer payload = frame.getPayload();
                     if (payload == null || payload.remaining() != 4) {
                         throw new H2ConnectionException(H2Error.FRAME_SIZE_ERROR, "Invalid RST_STREAM frame payload");
                     }
                     final int errorCode = payload.getInt();
-                    stream.reset(new H2StreamResetException(errorCode, "Stream reset (" + errorCode + ")"));
-                    streamMap.remove(streamId);
-                    stream.releaseResources();
-                    requestSessionOutput();
+                    if (errorCode == H2Error.NO_ERROR.getCode() && allowGracefulAbort(stream)) {
+                        stream.abortGracefully();
+                        requestSessionOutput();
+                    } else {
+                        stream.fail(new H2StreamResetException(errorCode, "Stream reset (" + errorCode + ")"));
+                        requestSessionOutput();
+                    }
                 }
             }
             break;
@@ -910,7 +911,6 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                         consumeSettingsFrame(payload);
                         remoteSettingState = SettingsHandshake.TRANSMITTED;
                     }
-                    // Send ACK
                     final RawFrame response = frameFactory.createSettingsAck();
                     commitFrame(response);
                     remoteSettingState = SettingsHandshake.ACKED;
@@ -918,10 +918,12 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
             }
             break;
             case PRIORITY:
-                // Stream priority not supported
                 break;
             case PUSH_PROMISE: {
                 acceptPushFrame();
+                if (streamId == 0) {
+                    throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "Illegal stream id: " + streamId);
+                }
 
                 if (goAwayReceived ) {
                     throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "GOAWAY received");
@@ -931,7 +933,7 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                     throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "Push is disabled");
                 }
 
-                final H2Stream stream = getValidStream(streamId);
+                final H2Stream stream = streams.lookupValid(streamId);
                 if (stream.isRemoteClosed()) {
                     stream.localReset(new H2StreamResetException(H2Error.STREAM_CLOSED, "Stream closed"));
                     break;
@@ -942,29 +944,21 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                     throw new H2ConnectionException(H2Error.FRAME_SIZE_ERROR, "Invalid PUSH_PROMISE payload");
                 }
                 final int promisedStreamId = payload.getInt();
-                if (promisedStreamId == 0 || idGenerator.isSameSide(promisedStreamId)) {
+                if (promisedStreamId == 0 || streams.isSameSide(promisedStreamId)) {
                     throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "Illegal promised stream id: " + promisedStreamId);
                 }
-                if (streamMap.get(promisedStreamId) != null) {
-                    throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "Unexpected promised stream id: " + promisedStreamId);
+                if (streams.lookupValidOrNull(promisedStreamId) != null) {
+                    throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "Stream already open: " + promisedStreamId);
                 }
 
-                updateLastStreamId(promisedStreamId);
-
-                final H2StreamChannelImpl channel = new H2StreamChannelImpl(
-                        promisedStreamId, false, initInputWinSize, initOutputWinSize);
-                final H2StreamHandler streamHandler;
+                final H2StreamChannel channel = createChannel(promisedStreamId);
+                final H2Stream promisedStream;
                 if (connState.compareTo(ConnectionHandshake.ACTIVE) <= 0) {
-                    streamHandler = createRemotelyInitiatedStream(channel, httpProcessor, connMetrics,
-                            stream.getPushHandlerFactory());
+                    promisedStream = streams.createReserved(channel, incomingPushPromise(channel, stream.getPushHandlerFactory()));
                 } else {
-                    streamHandler = NoopH2StreamHandler.INSTANCE;
-                    channel.setLocalEndStream();
+                    channel.localReset(H2Error.REFUSED_STREAM);
+                    promisedStream = streams.createActive(channel, NoopH2StreamHandler.INSTANCE);
                 }
-
-                final H2Stream promisedStream = new H2Stream(channel, streamHandler, true);
-                streamMap.put(promisedStreamId, promisedStream);
-
                 try {
                     consumePushPromiseFrame(frame, payload, promisedStream);
                 } catch (final H2StreamResetException ex) {
@@ -987,33 +981,57 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                 goAwayReceived = true;
                 if (errorCode == H2Error.NO_ERROR.getCode()) {
                     if (connState.compareTo(ConnectionHandshake.ACTIVE) <= 0) {
-                        for (final Iterator<Map.Entry<Integer, H2Stream>> it = streamMap.entrySet().iterator(); it.hasNext(); ) {
-                            final Map.Entry<Integer, H2Stream> entry = it.next();
-                            final int activeStreamId = entry.getKey();
-                            if (!idGenerator.isSameSide(activeStreamId) && activeStreamId > processedLocalStreamId) {
-                                final H2Stream stream = entry.getValue();
-                                stream.cancel();
+                        for (final Iterator<H2Stream> it = streams.iterator(); it.hasNext(); ) {
+                            final H2Stream stream = it.next();
+                            final int activeStreamId = stream.getId();
+                            if (!streams.isSameSide(activeStreamId) && activeStreamId > processedLocalStreamId) {
+                                stream.fail(new RequestNotExecutedException());
                                 it.remove();
                             }
                         }
                     }
-                    connState = streamMap.isEmpty() ? ConnectionHandshake.SHUTDOWN : ConnectionHandshake.GRACEFUL_SHUTDOWN;
+                    connState = streams.isEmpty() ? ConnectionHandshake.SHUTDOWN : ConnectionHandshake.GRACEFUL_SHUTDOWN;
                 } else {
-                    for (final Iterator<Map.Entry<Integer, H2Stream>> it = streamMap.entrySet().iterator(); it.hasNext(); ) {
-                        final Map.Entry<Integer, H2Stream> entry = it.next();
-                        final H2Stream stream = entry.getValue();
-                        stream.reset(new H2StreamResetException(errorCode, "Connection terminated by the peer (" + errorCode + ")"));
+                    for (final Iterator<H2Stream> it = streams.iterator(); it.hasNext(); ) {
+                        final H2Stream stream = it.next();
+                        stream.fail(new H2StreamResetException(errorCode, "Connection terminated by the peer (" + errorCode + ")"));
                     }
-                    streamMap.clear();
+                    streams.shutdownAndReleaseAll();
                     connState = ConnectionHandshake.SHUTDOWN;
                 }
             }
             ioSession.setEvent(SelectionKey.OP_WRITE);
             break;
+            case PRIORITY_UPDATE: {
+                if (streamId != 0) {
+                    throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "PRIORITY_UPDATE must be on stream 0");
+                }
+                final ByteBuffer payload = frame.getPayload();
+                if (payload == null || payload.remaining() < 4) {
+                    throw new H2ConnectionException(H2Error.FRAME_SIZE_ERROR, "Invalid PRIORITY_UPDATE payload");
+                }
+                final int prioritizedId = payload.getInt() & 0x7fffffff;
+                final int len = payload.remaining();
+                final String field;
+                if (len > 0) {
+                    final byte[] b = new byte[len];
+                    payload.get(b);
+                    field = new String(b, StandardCharsets.US_ASCII);
+                } else {
+                    field = "";
+                }
+                final PriorityValue pv = PriorityParamsParser.parse(field).toValueWithDefaults();
+                priorities.put(prioritizedId, pv);
+                requestSessionOutput();
+            }
+            break;
         }
     }
 
     private void consumeDataFrame(final RawFrame frame, final H2Stream stream) throws HttpException, IOException {
+        if (stream.isRemoteClosed()) {
+            throw new H2StreamResetException(H2Error.STREAM_CLOSED, "Stream already closed");
+        }
         final int streamId = stream.getId();
         final ByteBuffer payload = frame.getPayloadContent();
         if (payload != null) {
@@ -1024,40 +1042,29 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
             }
             final int connWinSize = updateInputWindow(0, connInputWindow, -frameLength);
             if (connWinSize < CONNECTION_WINDOW_LOW_MARK) {
-                maximizeConnWindow(connWinSize);
+                maximizeWindow(0, connInputWindow);
             }
         }
-        if (stream.isRemoteClosed()) {
-            throw new H2StreamResetException(H2Error.STREAM_CLOSED, "Stream already closed");
-        }
-        if (frame.isFlagSet(FrameFlag.END_STREAM)) {
-            stream.setRemoteEndStream();
-        }
-        if (stream.isLocalReset()) {
-            return;
-        }
-        stream.consumeData(payload);
+        stream.consumeData(payload, frame.isFlagSet(FrameFlag.END_STREAM));
     }
 
-    private void maximizeConnWindow(final int connWinSize) throws IOException {
-        final int delta = Integer.MAX_VALUE - connWinSize;
+    private void maximizeWindow(final int streamId, final AtomicInteger window) throws IOException {
+        final int delta = updateWindowMax(window);
         if (delta > 0) {
-            final RawFrame windowUpdateFrame = frameFactory.createWindowUpdate(0, delta);
+            final RawFrame windowUpdateFrame = frameFactory.createWindowUpdate(streamId, delta);
             commitFrame(windowUpdateFrame);
-            updateInputWindow(0, connInputWindow, delta);
         }
     }
 
     private void consumePushPromiseFrame(final RawFrame frame, final ByteBuffer payload, final H2Stream promisedStream) throws HttpException, IOException {
         final int promisedStreamId = promisedStream.getId();
+
         if (!frame.isFlagSet(FrameFlag.END_HEADERS)) {
-            continuation = new Continuation(promisedStreamId, frame.getType(), true);
+            continuation = new Continuation(promisedStreamId, frame.getType(), true,
+                    localConfig.getMaxContinuations());
         }
         if (continuation == null) {
             final List<Header> headers = hPackDecoder.decodeHeaders(payload);
-            if (promisedStreamId > processedRemoteStreamId) {
-                processedRemoteStreamId = promisedStreamId;
-            }
             if (streamListener != null) {
                 streamListener.onHeaderInput(this, promisedStreamId, headers);
             }
@@ -1072,64 +1079,48 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
     }
 
     private void consumeHeaderFrame(final RawFrame frame, final H2Stream stream) throws HttpException, IOException {
+        if (stream.isRemoteClosed()) {
+            throw new H2StreamResetException(H2Error.STREAM_CLOSED, "Stream already closed");
+        }
         final int streamId = stream.getId();
         if (!frame.isFlagSet(FrameFlag.END_HEADERS)) {
-            continuation = new Continuation(streamId, frame.getType(), frame.isFlagSet(FrameFlag.END_STREAM));
+            continuation = new Continuation(streamId, frame.getType(), frame.isFlagSet(FrameFlag.END_STREAM),
+                    localConfig.getMaxContinuations());
         }
         final ByteBuffer payload = frame.getPayloadContent();
         if (frame.isFlagSet(FrameFlag.PRIORITY)) {
-            // Priority not supported
             payload.getInt();
             payload.get();
         }
         if (continuation == null) {
             final List<Header> headers = decodeHeaders(payload);
-            if (stream.isRemoteInitiated() && streamId > processedRemoteStreamId) {
-                processedRemoteStreamId = streamId;
-            }
             if (streamListener != null) {
                 streamListener.onHeaderInput(this, streamId, headers);
             }
-            if (stream.isRemoteClosed()) {
-                throw new H2StreamResetException(H2Error.STREAM_CLOSED, "Stream already closed");
-            }
-            if (stream.isLocalReset()) {
-                return;
-            }
-            if (frame.isFlagSet(FrameFlag.END_STREAM)) {
-                stream.setRemoteEndStream();
-            }
-            stream.consumeHeader(headers);
+            recordPriorityFromHeaders(streamId, headers);
+            stream.consumeHeader(headers, frame.isFlagSet(FrameFlag.END_STREAM));
         } else {
             continuation.copyPayload(payload);
         }
     }
 
     private void consumeContinuationFrame(final RawFrame frame, final H2Stream stream) throws HttpException, IOException {
+        if (stream.isRemoteClosed()) {
+            throw new H2StreamResetException(H2Error.STREAM_CLOSED, "Stream already closed");
+        }
         final int streamId = frame.getStreamId();
         final ByteBuffer payload = frame.getPayload();
         continuation.copyPayload(payload);
         if (frame.isFlagSet(FrameFlag.END_HEADERS)) {
             final List<Header> headers = decodeHeaders(continuation.getContent());
-            if (stream.isRemoteInitiated() && streamId > processedRemoteStreamId) {
-                processedRemoteStreamId = streamId;
-            }
             if (streamListener != null) {
                 streamListener.onHeaderInput(this, streamId, headers);
             }
-            if (stream.isRemoteClosed()) {
-                throw new H2StreamResetException(H2Error.STREAM_CLOSED, "Stream already closed");
-            }
-            if (stream.isLocalReset()) {
-                return;
-            }
-            if (continuation.endStream) {
-                stream.setRemoteEndStream();
-            }
+            recordPriorityFromHeaders(streamId, headers);
             if (continuation.type == FrameType.PUSH_PROMISE.getValue()) {
                 stream.consumePromise(headers);
             } else {
-                stream.consumeHeader(headers);
+                stream.consumeHeader(headers, continuation.endStream);
             }
             continuation = null;
         }
@@ -1142,6 +1133,7 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
             final int value = payload.getInt();
             final H2Param param = H2Param.valueOf(code);
             if (param != null) {
+                validateSetting(param, value);
                 switch (param) {
                     case HEADER_TABLE_SIZE:
                         try {
@@ -1181,6 +1173,9 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                             throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, ex.getMessage());
                         }
                         break;
+                    case SETTINGS_NO_RFC7540_PRIORITIES:
+                        peerNoRfc7540Priorities = value == 1;
+                        break;
                 }
             }
         }
@@ -1188,15 +1183,15 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
     }
 
     private void produceOutput() throws HttpException, IOException {
-        for (final Iterator<Map.Entry<Integer, H2Stream>> it = streamMap.entrySet().iterator(); it.hasNext(); ) {
-            final Map.Entry<Integer, H2Stream> entry = it.next();
-            final H2Stream stream = entry.getValue();
-            if (!stream.isLocalClosed() && stream.getOutputWindow().get() > 0) {
+        for (final Iterator<H2Stream> it = streams.iterator(); it.hasNext(); ) {
+            final H2Stream stream = it.next();
+            if (!stream.isLocalClosed() && !stream.isReserved() && stream.getOutputWindow().get() > 0) {
                 stream.produceOutput();
             }
-            if (stream.isTerminated()) {
-                it.remove();
+            if (stream.isClosedPastLingerDeadline()) {
+                streams.dropStreamId(stream.getId());
                 stream.releaseResources();
+                it.remove();
                 requestSessionOutput();
             }
             if (!outputQueue.isEmpty()) {
@@ -1222,10 +1217,9 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
         }
 
         if (delta != 0) {
-            if (!streamMap.isEmpty()) {
-                for (final Iterator<Map.Entry<Integer, H2Stream>> it = streamMap.entrySet().iterator(); it.hasNext(); ) {
-                    final Map.Entry<Integer, H2Stream> entry = it.next();
-                    final H2Stream stream = entry.getValue();
+            if (!streams.isEmpty()) {
+                for (final Iterator<H2Stream> it = streams.iterator(); it.hasNext(); ) {
+                    final H2Stream stream = it.next();
                     try {
                         updateOutputWindow(stream.getId(), stream.getOutputWindow(), delta);
                     } catch (final ArithmeticException ex) {
@@ -1243,10 +1237,9 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
         final int delta = localConfig.getInitialWindowSize() - initInputWinSize;
         initInputWinSize = localConfig.getInitialWindowSize();
 
-        if (delta != 0 && !streamMap.isEmpty()) {
-            for (final Iterator<Map.Entry<Integer, H2Stream>> it = streamMap.entrySet().iterator(); it.hasNext(); ) {
-                final Map.Entry<Integer, H2Stream> entry = it.next();
-                final H2Stream stream = entry.getValue();
+        if (delta != 0 && !streams.isEmpty()) {
+            for (final Iterator<H2Stream> it = streams.iterator(); it.hasNext(); ) {
+                final H2Stream stream = it.next();
                 try {
                     updateInputWindow(stream.getId(), stream.getInputWindow(), delta);
                 } catch (final ArithmeticException ex) {
@@ -1320,8 +1313,10 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                 .append(", connInputWindow=").append(connInputWindow)
                 .append(", connOutputWindow=").append(connOutputWindow)
                 .append(", outputQueue=").append(outputQueue.size())
-                .append(", streamMap=").append(streamMap.size())
-                .append(", processedRemoteStreamId=").append(processedRemoteStreamId);
+                .append(", streams.localCoubt=").append(streams.getLocalCount())
+                .append(", streams.remoteCount=").append(streams.getRemoteCount())
+                .append(", streams.lastLocal=").append(streams.getLastLocalId())
+                .append(", streams.lastRemote=").append(streams.getLastRemoteId());
     }
 
     private static class Continuation {
@@ -1330,18 +1325,28 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
         final int type;
         final boolean endStream;
         final ByteArrayBuffer headerBuffer;
+        final int maxContinuation;
+        final boolean enforceMacContinuations;
 
-        private Continuation(final int streamId, final int type, final boolean endStream) {
+        private int count;
+
+        private Continuation(final int streamId, final int type, final boolean endStream, final int maxContinuation) {
             this.streamId = streamId;
             this.type = type;
             this.endStream = endStream;
+            this.maxContinuation = maxContinuation;
+            this.enforceMacContinuations = maxContinuation < Integer.MAX_VALUE;
             this.headerBuffer = new ByteArrayBuffer(1024);
         }
 
-        void copyPayload(final ByteBuffer payload) {
+        void copyPayload(final ByteBuffer payload) throws H2ConnectionException {
             if (payload == null) {
                 return;
             }
+            if (enforceMacContinuations && count > maxContinuation) {
+                throw new H2ConnectionException(H2Error.ENHANCE_YOUR_CALM, "Excessive number of continuation frames");
+            }
+            count++;
             final int originalLength = headerBuffer.length();
             final int toCopy = payload.remaining();
             headerBuffer.ensureCapacity(toCopy);
@@ -1355,35 +1360,61 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
 
     }
 
-    private class H2StreamChannelImpl implements H2StreamChannel {
+    H2StreamChannel createChannel(final int streamId) {
+        return new H2StreamChannelImpl(streamId, initInputWinSize, initOutputWinSize);
+    }
+
+    H2Stream createStream(final H2StreamChannel channel, final H2StreamHandler streamHandler) throws H2ConnectionException {
+        return streams.createActive(channel, streamHandler);
+    }
+
+    private void recordPriorityFromHeaders(final int streamId, final List<? extends Header> headers) {
+        if (headers == null || headers.isEmpty()) {
+            return;
+        }
+        for (final Header h : headers) {
+            if (HttpHeaders.PRIORITY.equalsIgnoreCase(h.getName())) {
+                final PriorityValue pv = PriorityParamsParser.parse(h.getValue()).toValueWithDefaults();
+                priorities.put(streamId, pv);
+                break;
+            }
+        }
+    }
+
+    class H2StreamChannelImpl implements H2StreamChannel {
 
         private final int id;
         private final AtomicInteger inputWindow;
         private final AtomicInteger outputWindow;
 
-        private volatile boolean idle;
-        private volatile boolean remoteEndStream;
-        private volatile boolean localEndStream;
+        private volatile boolean localClosed;
+        private volatile long localResetTime;
 
-        private volatile long deadline;
-
-        H2StreamChannelImpl(final int id, final boolean idle, final int initialInputWindowSize, final int initialOutputWindowSize) {
+        H2StreamChannelImpl(final int id, final int initialInputWindowSize, final int initialOutputWindowSize) {
             this.id = id;
-            this.idle = idle;
             this.inputWindow = new AtomicInteger(initialInputWindowSize);
             this.outputWindow = new AtomicInteger(initialOutputWindowSize);
         }
 
-        int getId() {
+        @Override
+        public int getId() {
             return id;
         }
 
-        AtomicInteger getOutputWindow() {
+        @Override
+        public AtomicInteger getOutputWindow() {
             return outputWindow;
         }
 
-        AtomicInteger getInputWindow() {
+        @Override
+        public AtomicInteger getInputWindow() {
             return inputWindow;
+        }
+
+        void ensureNotClosed() throws H2ConnectionException {
+            if (localClosed) {
+                throw new H2ConnectionException(H2Error.INTERNAL_ERROR, "Stream already closed locally");
+            }
         }
 
         @Override
@@ -1393,13 +1424,32 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                 if (headers == null || headers.isEmpty()) {
                     throw new H2ConnectionException(H2Error.INTERNAL_ERROR, "Message headers are missing");
                 }
-                if (localEndStream) {
+                if (isLocalReset()) {
                     return;
                 }
-                idle = false;
+                ensureNotClosed();
+                if (peerNoRfc7540Priorities && streams.isSameSide(id)) {
+                    for (final Header h : headers) {
+                        if (HttpHeaders.PRIORITY.equalsIgnoreCase(h.getName())) {
+                            final byte[] ascii = h.getValue() != null
+                                    ? h.getValue().getBytes(StandardCharsets.US_ASCII)
+                                    : new byte[0];
+                            final ByteArrayBuffer b = new ByteArrayBuffer(4 + ascii.length);
+                            b.append((byte) (id >> 24));
+                            b.append((byte) (id >> 16));
+                            b.append((byte) (id >> 8));
+                            b.append((byte) id);
+                            b.append(ascii, 0, ascii.length);
+                            final ByteBuffer pl = ByteBuffer.wrap(b.array(), 0, b.length());
+                            final RawFrame priUpd = new RawFrame(FrameType.PRIORITY_UPDATE.getValue(), 0, 0, pl);
+                            commitFrameInternal(priUpd);
+                            break;
+                        }
+                    }
+                }
                 commitHeaders(id, headers, endStream);
                 if (endStream) {
-                    localEndStream = true;
+                    localClosed = true;
                 }
             } finally {
                 ioSession.getLock().unlock();
@@ -1409,28 +1459,19 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
         @Override
         public void push(final List<Header> headers, final AsyncPushProducer pushProducer) throws HttpException, IOException {
             acceptPushRequest();
-            final int promisedStreamId = generateStreamId();
-            final H2StreamChannelImpl channel = new H2StreamChannelImpl(
-                    promisedStreamId,
-                    true,
-                    localConfig.getInitialWindowSize(),
-                    remoteConfig.getInitialWindowSize());
-            final HttpCoreContext context = HttpCoreContext.create();
-            context.setSSLSession(getSSLSession());
-            context.setEndpointDetails(getEndpointDetails());
-            final H2StreamHandler streamHandler = new ServerPushH2StreamHandler(
-                    channel, httpProcessor, connMetrics, pushProducer, context);
-            final H2Stream stream = new H2Stream(channel, streamHandler, false);
-            streamMap.put(promisedStreamId, stream);
-
             ioSession.getLock().lock();
             try {
-                if (localEndStream) {
-                    stream.releaseResources();
+                if (isLocalReset()) {
                     return;
                 }
+                ensureNotClosed();
+                final int promisedStreamId = streams.generateStreamId();
+                final H2StreamChannel channel = createChannel(promisedStreamId);
+                final H2Stream stream = streams.createReserved(channel, outgoingPushPromise(channel, pushProducer));
+
                 commitPushPromise(id, promisedStreamId, headers);
-                idle = false;
+                stream.markRemoteClosed();
+                submitCommand(new PushResponseCommand(promisedStreamId));
             } finally {
                 ioSession.getLock().unlock();
             }
@@ -1438,9 +1479,6 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
 
         @Override
         public void update(final int increment) throws IOException {
-            if (remoteEndStream) {
-                return;
-            }
             incrementInputCapacity(0, connInputWindow, increment);
             incrementInputCapacity(id, inputWindow, increment);
         }
@@ -1449,9 +1487,10 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
         public int write(final ByteBuffer payload) throws IOException {
             ioSession.getLock().lock();
             try {
-                if (localEndStream) {
+                if (isLocalReset()) {
                     return 0;
                 }
+                ensureNotClosed();
                 return streamData(id, outputWindow, payload);
             } finally {
                 ioSession.getLock().unlock();
@@ -1462,10 +1501,11 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
         public void endStream(final List<? extends Header> trailers) throws IOException {
             ioSession.getLock().lock();
             try {
-                if (localEndStream) {
+                if (isLocalReset()) {
                     return;
                 }
-                localEndStream = true;
+                ensureNotClosed();
+                localClosed = true;
                 if (trailers != null && !trailers.isEmpty()) {
                     commitHeaders(id, trailers, true);
                 } else {
@@ -1487,52 +1527,37 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
             requestSessionOutput();
         }
 
-        boolean isRemoteClosed() {
-            return remoteEndStream;
+        @Override
+        public boolean isLocalClosed() {
+            return localClosed;
         }
 
-        void setRemoteEndStream() {
-            remoteEndStream = true;
+        @Override
+        public void markLocalClosed() {
+            localClosed = true;
         }
 
-        boolean isLocalClosed() {
-            return localEndStream;
-        }
-
-        void setLocalEndStream() {
-            localEndStream = true;
-        }
-
-        boolean isLocalReset() {
-            return deadline > 0;
-        }
-
-        boolean isResetDeadline() {
-            final long l = deadline;
-            return l > 0 && l < System.currentTimeMillis();
-        }
-
-        boolean localReset(final int code) throws IOException {
+        @Override
+        public boolean localReset(final int code) throws IOException {
             ioSession.getLock().lock();
             try {
-                if (localEndStream) {
+                if (isLocalReset()) {
                     return false;
                 }
-                localEndStream = true;
-                deadline = System.currentTimeMillis() + LINGER_TIME;
-                if (!idle) {
-                    final RawFrame resetStream = frameFactory.createResetStream(id, code);
-                    commitFrameInternal(resetStream);
-                    return true;
-                }
-                return false;
+                localClosed = true;
+                localResetTime = System.currentTimeMillis();
+
+                final RawFrame resetStream = frameFactory.createResetStream(id, code);
+                commitFrameInternal(resetStream);
+                return true;
             } finally {
                 ioSession.getLock().unlock();
             }
         }
 
-        boolean localReset(final H2Error error) throws IOException {
-            return localReset(error != null ? error.getCode() : H2Error.INTERNAL_ERROR.getCode());
+        @Override
+        public long getLocalResetTime() {
+            return localResetTime;
         }
 
         @Override
@@ -1544,173 +1569,16 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
             }
         }
 
-        void appendState(final StringBuilder buf) {
-            buf.append("id=").append(id)
+        @Override
+        public String toString() {
+            final StringBuilder buf = new StringBuilder();
+            buf.append("[")
+                    .append("id=").append(id)
                     .append(", connState=").append(connState)
                     .append(", inputWindow=").append(inputWindow)
                     .append(", outputWindow=").append(outputWindow)
-                    .append(", localEndStream=").append(localEndStream)
-                    .append(", idle=").append(idle);
-        }
-
-        @Override
-        public String toString() {
-            final StringBuilder buf = new StringBuilder();
-            buf.append("[");
-            appendState(buf);
-            buf.append("]");
-            return buf.toString();
-        }
-
-    }
-
-    static class H2Stream {
-
-        private final H2StreamChannelImpl channel;
-        private final H2StreamHandler handler;
-        private final boolean remoteInitiated;
-
-        private H2Stream(
-                final H2StreamChannelImpl channel,
-                final H2StreamHandler handler,
-                final boolean remoteInitiated) {
-            this.channel = channel;
-            this.handler = handler;
-            this.remoteInitiated = remoteInitiated;
-        }
-
-        int getId() {
-            return channel.getId();
-        }
-
-        boolean isRemoteInitiated() {
-            return remoteInitiated;
-        }
-
-        AtomicInteger getOutputWindow() {
-            return channel.getOutputWindow();
-        }
-
-        AtomicInteger getInputWindow() {
-            return channel.getInputWindow();
-        }
-
-        boolean isTerminated() {
-            return channel.isLocalClosed() && (channel.isRemoteClosed() || channel.isResetDeadline());
-        }
-
-        boolean isRemoteClosed() {
-            return channel.isRemoteClosed();
-        }
-
-        boolean isLocalClosed() {
-            return channel.isLocalClosed();
-        }
-
-        boolean isLocalReset() {
-            return channel.isLocalReset();
-        }
-
-        void setRemoteEndStream() {
-            channel.setRemoteEndStream();
-        }
-
-        void consumePromise(final List<Header> headers) throws HttpException, IOException {
-            try {
-                handler.consumePromise(headers);
-                channel.setLocalEndStream();
-            } catch (final ProtocolException ex) {
-                localReset(ex, H2Error.PROTOCOL_ERROR);
-            }
-        }
-
-        void consumeHeader(final List<Header> headers) throws HttpException, IOException {
-            try {
-                handler.consumeHeader(headers, channel.isRemoteClosed());
-            } catch (final ProtocolException ex) {
-                localReset(ex, H2Error.PROTOCOL_ERROR);
-            }
-        }
-
-        void consumeData(final ByteBuffer src) throws HttpException, IOException {
-            try {
-                handler.consumeData(src, channel.isRemoteClosed());
-            } catch (final CharacterCodingException ex) {
-                localReset(ex, H2Error.INTERNAL_ERROR);
-            } catch (final ProtocolException ex) {
-                localReset(ex, H2Error.PROTOCOL_ERROR);
-            }
-        }
-
-        boolean isOutputReady() {
-            return handler.isOutputReady();
-        }
-
-        void produceOutput() throws HttpException, IOException {
-            try {
-                handler.produceOutput();
-            } catch (final ProtocolException ex) {
-                localReset(ex, H2Error.PROTOCOL_ERROR);
-            }
-        }
-
-        void produceInputCapacityUpdate() throws IOException {
-            handler.updateInputCapacity();
-        }
-
-        void reset(final Exception cause) {
-            channel.setRemoteEndStream();
-            channel.setLocalEndStream();
-            handler.failed(cause);
-        }
-
-        void localReset(final Exception cause, final int code) throws IOException {
-            channel.localReset(code);
-            handler.failed(cause);
-        }
-
-        void localReset(final Exception cause, final H2Error error) throws IOException {
-            localReset(cause, error != null ? error.getCode() : H2Error.INTERNAL_ERROR.getCode());
-        }
-
-        void localReset(final H2StreamResetException ex) throws IOException {
-            localReset(ex, ex.getCode());
-        }
-
-        void handle(final HttpException ex) throws IOException, HttpException {
-            handler.handle(ex, channel.isRemoteClosed());
-        }
-
-        HandlerFactory<AsyncPushConsumer> getPushHandlerFactory() {
-            return handler.getPushHandlerFactory();
-        }
-
-        void cancel() {
-            reset(new RequestNotExecutedException());
-        }
-
-        boolean abort() {
-            final boolean cancelled = channel.cancel();
-            handler.failed(new RequestNotExecutedException());
-            return cancelled;
-        }
-
-        void releaseResources() {
-            handler.releaseResources();
-        }
-
-        void appendState(final StringBuilder buf) {
-            buf.append("channel=[");
-            channel.appendState(buf);
-            buf.append("]");
-        }
-
-        @Override
-        public String toString() {
-            final StringBuilder buf = new StringBuilder();
-            buf.append("[");
-            appendState(buf);
-            buf.append("]");
+                    .append(", localClosed=").append(localClosed)
+                    .append("]");
             return buf.toString();
         }
 
