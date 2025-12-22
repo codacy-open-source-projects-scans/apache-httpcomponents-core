@@ -31,6 +31,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketTimeoutException;
 import java.net.URI;
@@ -40,6 +41,7 @@ import java.nio.channels.WritableByteChannel;
 import java.util.List;
 import java.util.Random;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -74,7 +76,6 @@ import org.apache.hc.core5.util.TextUtils;
 import org.apache.hc.core5.util.Timeout;
 import org.hamcrest.CoreMatchers;
 import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.reactivestreams.Publisher;
@@ -211,7 +212,7 @@ abstract class ReactiveClientTest {
 
         final ExecutionException exception = Assertions.assertThrows(ExecutionException.class, () ->
                 future.get(RESULT_TIMEOUT.getDuration(), RESULT_TIMEOUT.getTimeUnit()));
-        Assertions.assertTrue(exception.getCause() instanceof HttpStreamResetException);
+        Assertions.assertInstanceOf(HttpStreamResetException.class, exception.getCause());
         Assertions.assertSame(exceptionThrown, exception.getCause().getCause());
     }
 
@@ -219,9 +220,9 @@ abstract class ReactiveClientTest {
     void testRequestTimeout() throws Exception {
         final InetSocketAddress address = startServer();
         final HttpAsyncRequester requester = clientResource.start();
-        final AtomicBoolean requestPublisherWasCancelled = new AtomicBoolean();
+        final CountDownLatch requestPublisherCancellation = new CountDownLatch(1);
         final Publisher<ByteBuffer> publisher = Flowable.<ByteBuffer>never()
-                .doOnCancel(() -> requestPublisherWasCancelled.set(true));
+                .doOnCancel(requestPublisherCancellation::countDown);
         final ReactiveEntityProducer producer = new ReactiveEntityProducer(publisher, -1, null, null);
         final BasicRequestProducer request = getRequestProducer(address, producer);
 
@@ -230,7 +231,7 @@ abstract class ReactiveClientTest {
 
         final ExecutionException exception = Assertions.assertThrows(ExecutionException.class, () ->
                 future.get(RESULT_TIMEOUT.getDuration(), RESULT_TIMEOUT.getTimeUnit()));
-        Assertions.assertTrue(requestPublisherWasCancelled.get());
+        Assertions.assertTrue(requestPublisherCancellation.await(RESULT_TIMEOUT.getDuration(), RESULT_TIMEOUT.getTimeUnit()));
         final Throwable cause = exception.getCause();
         if (versionPolicy == HttpVersionPolicy.FORCE_HTTP_1) {
             Assertions.assertTrue(cause instanceof SocketTimeoutException, "Expected SocketTimeoutException, but got " + cause.getClass().getName());
@@ -242,14 +243,13 @@ abstract class ReactiveClientTest {
     }
 
     @Test
-    @Disabled("Fails intermittently in GitHub Actions")
     void testResponseCancellation() throws Exception {
         final InetSocketAddress address = startServer();
         final HttpAsyncRequester requester = clientResource.start();
-        final AtomicBoolean requestPublisherWasCancelled = new AtomicBoolean();
+        final CountDownLatch requestPublisherCancellation = new CountDownLatch(1);
         final AtomicReference<Throwable> requestStreamError = new AtomicReference<>();
         final Publisher<ByteBuffer> stream = Reactive3TestUtils.produceStream(Long.MAX_VALUE, 1024, null)
-                .doOnCancel(() -> requestPublisherWasCancelled.set(true))
+                .doOnCancel(requestPublisherCancellation::countDown)
                 .doOnError(requestStreamError::set);
         final ReactiveEntityProducer producer = new ReactiveEntityProducer(stream, -1, null, null);
         final BasicRequestProducer request = getRequestProducer(address, producer);
@@ -272,14 +272,14 @@ abstract class ReactiveClientTest {
         assertThat(exception, CoreMatchers.anyOf(
                 CoreMatchers.instanceOf(CancellationException.class),
                 CoreMatchers.instanceOf(ExecutionException.class)));
-        Assertions.assertTrue(exception.getCause() instanceof HttpStreamResetException);
-        Assertions.assertTrue(requestPublisherWasCancelled.get());
+        Assertions.assertInstanceOf(HttpStreamResetException.class, exception.getCause());
+        Assertions.assertTrue(requestPublisherCancellation.await(RESULT_TIMEOUT.getDuration(), RESULT_TIMEOUT.getTimeUnit()));
         Assertions.assertNull(requestStreamError.get());
     }
 
     private InetSocketAddress startServer() throws IOException, InterruptedException, ExecutionException {
         final HttpAsyncServer server = serverResource.start();
-        final ListenerEndpoint listener = server.listen(new InetSocketAddress(0), URIScheme.HTTP).get();
+        final ListenerEndpoint listener = server.listen(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), URIScheme.HTTP).get();
         final InetSocketAddress address = (InetSocketAddress) listener.getAddress();
         return address;
     }
