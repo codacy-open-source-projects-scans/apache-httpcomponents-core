@@ -36,11 +36,12 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.EnabledForJreRange;
 import org.junit.jupiter.api.condition.JRE;
-import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.api.parallel.Isolated;
 
 class AlpnTests {
 
     @Nested
+    @Isolated
     @DisplayName("ALPN Oracle")
     class OracleJSSEAlpnTest extends AlpnTest {
 
@@ -51,8 +52,9 @@ class AlpnTests {
     }
 
     @Nested
+    @Isolated
     @DisplayName("ALPN Conscrypt (Java 9 or newer)")
-    @DisabledOnOs(OS.MAC)
+    @DisabledOnOs(architectures = "aarch64")
     @EnabledForJreRange(min = JRE.JAVA_9)
     class ConscryptJSSEAlpnTest extends AlpnTest {
 
@@ -63,8 +65,9 @@ class AlpnTests {
     }
 
     @Nested
+    @Isolated
     @DisplayName("ALPN Conscrypt (Conscrypt specific TLS strategies)")
-    @DisabledOnOs(OS.MAC)
+    @DisabledOnOs(architectures = "aarch64")
     class ConscryptJSSEAndStrategiesAlpnTest extends AlpnTest {
 
         public ConscryptJSSEAndStrategiesAlpnTest() throws Exception {
@@ -72,5 +75,4 @@ class AlpnTests {
         }
 
     }
-
 }

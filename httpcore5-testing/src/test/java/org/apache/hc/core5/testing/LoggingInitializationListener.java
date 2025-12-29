@@ -24,27 +24,19 @@
  * <http://www.apache.org/>.
  *
  */
+package org.apache.hc.core5.testing;
 
-package org.apache.hc.core5.http;
-
-import org.apache.hc.core5.annotation.Internal;
-import org.apache.hc.core5.concurrent.Cancellable;
-import org.apache.hc.core5.util.Timeout;
+import org.junit.platform.launcher.LauncherSession;
+import org.junit.platform.launcher.LauncherSessionListener;
+import org.slf4j.LoggerFactory;
 
 /**
- * Represents a message stream control interface.
- *
- * @since 5.5
+ * Initialize Slf4j centrally before any tests run. This prevents Slf4j from
+ * spamming warnings during parallelized test runs.
  */
-@Internal
-public interface StreamControl extends Cancellable {
-
-    enum State { RESERVED, OPEN, CLOSED }
-
-    int getId();
-
-    State getState();
-
-    void setTimeout(Timeout timeout);
-
+public class LoggingInitializationListener implements LauncherSessionListener {
+    @Override
+    public void launcherSessionOpened(final LauncherSession session) {
+        LoggerFactory.getILoggerFactory();
+    }
 }
