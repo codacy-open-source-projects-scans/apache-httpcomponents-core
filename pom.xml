@@ -32,7 +32,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>org.apache.httpcomponents.core5</groupId>
   <artifactId>httpcore5-parent</artifactId>
-  <name>Apache HttpComponents Core Parent</name>
+  <name>Apache HttpComponents Core</name>
   <version>5.5-alpha1-SNAPSHOT</version>
   <description>Apache HttpComponents Core is a library of components for building HTTP enabled services</description>
   <url>https://hc.apache.org/httpcomponents-core-5.4.x/${project.version}/</url>
@@ -236,11 +236,6 @@
               <type>jar</type>
             </dependency>
           </oldVersion>
-          <newVersion>
-            <file>
-              <path>${project.build.directory}/${project.artifactId}-${project.version}.${project.packaging}</path>
-            </file>
-          </newVersion>
           <parameter>
             <breakBuildOnBinaryIncompatibleModifications>true</breakBuildOnBinaryIncompatibleModifications>
             <breakBuildOnSourceIncompatibleModifications>true</breakBuildOnSourceIncompatibleModifications>
@@ -255,6 +250,9 @@
               <exclude>@org.apache.hc.core5.annotation.Internal</exclude>
               <exclude>org.apache.hc.core5.testing.reactive.ReactiveTestUtils</exclude>
             </excludes>
+            <skipXmlReport>true</skipXmlReport>
+            <skipHtmlReport>false</skipHtmlReport>
+            <skipDiffReport>false</skipDiffReport>
           </parameter>
         </configuration>
         <executions>
@@ -269,28 +267,23 @@
       <plugin>
         <groupId>org.apache.rat</groupId>
         <artifactId>apache-rat-plugin</artifactId>
+        <version>0.17</version>
         <executions>
           <execution>
             <phase>verify</phase>
+            <inherited>false</inherited>
             <goals>
               <goal>check</goal>
             </goals>
           </execution>
         </executions>
-        <configuration>
-          <excludes>
-            <exclude>**/.checkstyle</exclude>
-            <exclude>**/.pmd</exclude>
-            <exclude>**/*.iml</exclude>
-            <exclude>**/.externalToolBuilders/**</exclude>
-            <exclude>maven-eclipse.xml</exclude>
-            <exclude>src/docbkx/resources/**</exclude>
-            <exclude>src/test/resources/*.truststore</exclude>
-            <exclude>src/test/resources/*.p12</exclude>
-            <exclude>**/.dockerignore</exclude>
-            <!-- Eclipse can leave some file in 'bin' when an imported project misconfigured. -->
-            <exclude>bin/**</exclude>
-          </excludes>
+        <configuration combine.self="override">
+          <excludeSubProjects>false</excludeSubProjects>
+          <inputExcludes>
+            <inputExclude>**/*.pem</inputExclude>
+            <inputExclude>**/.pmd</inputExclude>
+            <inputExclude>**/maven-eclipse.xml</inputExclude>
+          </inputExcludes>
         </configuration>
       </plugin>
     </plugins>
@@ -349,7 +342,6 @@
           <reportSet>
             <reports>
               <report>javadoc</report>
-              <report>aggregate</report>
             </reports>
           </reportSet>
         </reportSets>
@@ -373,25 +365,16 @@
               <type>jar</type>
             </dependency>
           </oldVersion>
-          <newVersion>
-            <file>
-              <path>${project.build.directory}/${project.artifactId}-${project.version}.${project.packaging}</path>
-            </file>
-          </newVersion>
           <parameter>
             <ignoreMissingClasses>true</ignoreMissingClasses>
             <excludes>
               <exclude>@org.apache.hc.core5.annotation.Internal</exclude>
+              <exclude>org.apache.hc.core5.testing.reactive.ReactiveTestUtils</exclude>
             </excludes>
+            <reportOnlyFilename>true</reportOnlyFilename>
             <ignoreMissingClasses>true</ignoreMissingClasses>
           </parameter>
         </configuration>
-      </plugin>
-      <plugin>
-        <artifactId>maven-jxr-plugin</artifactId>
-      </plugin>
-      <plugin>
-        <artifactId>maven-surefire-report-plugin</artifactId>
       </plugin>
     </plugins>
   </reporting>
