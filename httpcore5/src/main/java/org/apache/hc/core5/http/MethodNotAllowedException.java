@@ -24,37 +24,33 @@
  * <http://www.apache.org/>.
  *
  */
-package org.apache.hc.core5.http.nio.entity;
 
-import org.apache.hc.core5.http.config.CharCodingConfig;
+package org.apache.hc.core5.http;
 
 /**
- * Basic {@link org.apache.hc.core5.http.nio.AsyncEntityConsumer} implementation
- * that processes the data stream content into a string.
+ * Signals that an HTTP method is not allowed.
  *
- * @since 5.0
+ * @since 5.5
  */
-public class StringAsyncEntityConsumer extends CharSequenceAsyncEntityConsumer<String> {
+public class MethodNotAllowedException extends ProtocolException {
 
-    public StringAsyncEntityConsumer(final int bufSize, final int capacityIncrement, final CharCodingConfig charCodingConfig) {
-        super(bufSize, capacityIncrement, charCodingConfig, CharSequence::toString);
+    /**
+     * Creates a new MethodNotAllowedException with the specified detail message.
+     *
+     * @param message The exception detail message
+     */
+    public MethodNotAllowedException(final String message) {
+        super(message);
     }
 
-    public StringAsyncEntityConsumer(final int capacityIncrement) {
-        super(DEF_BUF_SIZE, capacityIncrement, CharCodingConfig.DEFAULT, CharSequence::toString);
+    /**
+     * Creates a new MethodNotAllowedException with the specified detail message and cause.
+     *
+     * @param message the exception detail message
+     * @param cause the {@code Throwable} that caused this exception, or {@code null}
+     * if the cause is unavailable, unknown, or not a {@code Throwable}
+     */
+    public MethodNotAllowedException(final String message, final Throwable cause) {
+        super(message, cause);
     }
-
-    public StringAsyncEntityConsumer(final CharCodingConfig charCodingConfig) {
-        super(DEF_BUF_SIZE, Integer.MAX_VALUE, charCodingConfig, CharSequence::toString);
-    }
-
-    public StringAsyncEntityConsumer() {
-        super(Integer.MAX_VALUE, CharSequence::toString);
-    }
-
-    @Override
-    public String generateContent() {
-        return super.generateContent();
-    }
-
 }

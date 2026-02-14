@@ -24,37 +24,18 @@
  * <http://www.apache.org/>.
  *
  */
-package org.apache.hc.core5.http.nio.entity;
 
-import org.apache.hc.core5.http.config.CharCodingConfig;
+package org.apache.hc.core5.http;
 
 /**
- * Basic {@link org.apache.hc.core5.http.nio.AsyncEntityConsumer} implementation
- * that processes the data stream content into a string.
+ * Represents a generic request / response message exchange.
  *
- * @since 5.0
+ * @param <H> message head type.
+ * @since 5.5
  */
-public class StringAsyncEntityConsumer extends CharSequenceAsyncEntityConsumer<String> {
+@FunctionalInterface
+public interface Validator<H extends HttpMessage> {
 
-    public StringAsyncEntityConsumer(final int bufSize, final int capacityIncrement, final CharCodingConfig charCodingConfig) {
-        super(bufSize, capacityIncrement, charCodingConfig, CharSequence::toString);
-    }
-
-    public StringAsyncEntityConsumer(final int capacityIncrement) {
-        super(DEF_BUF_SIZE, capacityIncrement, CharCodingConfig.DEFAULT, CharSequence::toString);
-    }
-
-    public StringAsyncEntityConsumer(final CharCodingConfig charCodingConfig) {
-        super(DEF_BUF_SIZE, Integer.MAX_VALUE, charCodingConfig, CharSequence::toString);
-    }
-
-    public StringAsyncEntityConsumer() {
-        super(Integer.MAX_VALUE, CharSequence::toString);
-    }
-
-    @Override
-    public String generateContent() {
-        return super.generateContent();
-    }
+    void validate(H messageHead) throws HttpException;
 
 }
