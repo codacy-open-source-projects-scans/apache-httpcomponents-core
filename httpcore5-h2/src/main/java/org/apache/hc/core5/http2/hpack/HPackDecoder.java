@@ -104,24 +104,28 @@ public final class HPackDecoder {
     static int decodeInt(final ByteBuffer src, final int n) throws HPackException {
 
         final int nbits = 0xff >>> (8 - n);
-        int value = readByte(src) & nbits;
+        long value = readByte(src) & nbits;
         if (value < nbits) {
-            return value;
+            return (int) value;
         }
         int m = 0;
         while (m < 32) {
             final int b = readByte(src);
-            if ((b & 0x80) != 0) {
-                value += (b & 0x7f) << m;
-                m += 7;
-            } else {
-                if (m == 28 && (b & 0xf8) != 0) {
-                    break;
-                }
-                value += b << m;
-                return value;
+
+            value += (long) (b & 0x7f) << m;
+
+            // HPACK integers are unsigned; reject values that exceed Integer.MAX_VALUE to avoid signed overflow
+            // and ensure malformed input is reported as HPackException (protocol error) rather than runtime failure.
+            if (value > Integer.MAX_VALUE) {
+                throw new HPackException(MAX_LIMIT_EXCEEDED);
             }
+
+            if ((b & 0x80) == 0) {
+                return (int) value;
+            }
+            m += 7;
         }
+
         throw new HPackException(MAX_LIMIT_EXCEEDED);
     }
 
@@ -267,11 +271,11 @@ public final class HPackDecoder {
     }
 
     public Header decodeHeader(final ByteBuffer src) throws HPackException {
-        final HPackHeader header = decodeHPackHeader(src);
+        final HPackHeader header = decodeHPackHeader(src, true);
         return header != null ? new BasicHeader(header.getName(), header.getValue(), header.isSensitive()) : null;
     }
 
-    HPackHeader decodeHPackHeader(final ByteBuffer src) throws HPackException {
+    HPackHeader decodeHPackHeader(final ByteBuffer src, final boolean allowTableSizeUpdate) throws HPackException {
         try {
             while (src.hasRemaining()) {
                 final int b = peekByte(src);
@@ -284,6 +288,9 @@ public final class HPackDecoder {
                 } else if ((b & 0xf0) == 0x10) {
                     return decodeLiteralHeader(src, HPackRepresentation.NEVER_INDEXED);
                 } else if ((b & 0xe0) == 0x20) {
+                    if (!allowTableSizeUpdate) {
+                        throw new HPackException("Dynamic table size update must appear at the beginning of a header block");
+                    }
                     final int maxSize = decodeInt(src, 5);
                     if (maxSize > this.maxTableSize) {
                         throw new HPackException("Requested dynamic header table size exceeds maximum size: " + maxSize);
@@ -302,13 +309,17 @@ public final class HPackDecoder {
     public List<Header> decodeHeaders(final ByteBuffer src) throws HPackException {
         final boolean enforceSizeLimit = maxListSize < Integer.MAX_VALUE;
         int listSize = 0;
+        // RFC 7541 §4.2: dynamic table size updates are only allowed at the
+        // beginning of a header block (before the first header field).
+        boolean allowTableSizeUpdate = true;
 
         final List<Header> list = new ArrayList<>();
         while (src.hasRemaining()) {
-            final HPackHeader header = decodeHPackHeader(src);
+            final HPackHeader header = decodeHPackHeader(src, allowTableSizeUpdate);
             if (header == null) {
                 break;
             }
+            allowTableSizeUpdate = false;
             if (enforceSizeLimit) {
                 listSize += header.getTotalSize();
                 if (listSize >= maxListSize) {

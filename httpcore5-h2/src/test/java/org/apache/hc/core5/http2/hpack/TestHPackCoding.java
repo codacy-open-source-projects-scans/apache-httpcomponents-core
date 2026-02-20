@@ -1178,5 +1178,60 @@ class TestHPackCoding {
         Assertions.assertThrows(HPackException.class, () -> decoder.decodeHeaders(wrap(buf)));
     }
 
+    @Test
+    void decoderRejectsDynamicTableSizeUpdateMidHeaderBlock() {
+        final InboundDynamicTable dynamicTable = new InboundDynamicTable(4096);
+        final HPackDecoder decoder = new HPackDecoder(dynamicTable, StandardCharsets.US_ASCII);
+
+        final ByteBuffer src = createByteBuffer(
+                0x82, // :method: GET
+                0x20  // dynamic table size update (0) - illegal after first header field
+        );
+
+        final HPackException ex = Assertions.assertThrows(HPackException.class, () -> decoder.decodeHeaders(src));
+        Assertions.assertTrue(ex.getMessage().contains("beginning of a header block"));
+    }
+
+    @Test
+    void decoderAllowsMultipleLeadingDynamicTableSizeUpdates() throws Exception {
+        final InboundDynamicTable dynamicTable = new InboundDynamicTable(4096);
+        final HPackDecoder decoder = new HPackDecoder(dynamicTable, StandardCharsets.US_ASCII);
+
+        final ByteBuffer src = createByteBuffer(
+                0x20, // dynamic table size update (0)
+                0x2a, // dynamic table size update (10)
+                0x82  // :method: GET
+        );
+
+        final List<Header> headers = decoder.decodeHeaders(src);
+        Assertions.assertEquals(1, headers.size());
+        assertHeaderEquals(new BasicHeader(":method", "GET"), headers.get(0));
+        Assertions.assertEquals(10, dynamicTable.getMaxSize());
+    }
+
+    @Test
+    void decoderRejectsDynamicTableSizeUpdateAfterLeadingUpdateAndHeader() {
+        final InboundDynamicTable dynamicTable = new InboundDynamicTable(4096);
+        final HPackDecoder decoder = new HPackDecoder(dynamicTable, StandardCharsets.US_ASCII);
+
+        final ByteBuffer src = createByteBuffer(
+                0x20, // dynamic table size update (0)
+                0x82, // :method: GET
+                0x20  // dynamic table size update (0) - illegal after first header field
+        );
+
+        final HPackException ex = Assertions.assertThrows(HPackException.class, () -> decoder.decodeHeaders(src));
+        Assertions.assertTrue(ex.getMessage().contains("beginning of a header block"));
+    }
+
+    @Test
+    void testIntegerDecodingOverflow() {
+        // 7-bit prefix integer that mathematically decodes to Integer.MAX_VALUE + 127.
+        // Without an overflow guard this wraps to a negative int and leaks into higher-level decoding.
+        Assertions.assertThrows(HPackException.class, () ->
+                HPackDecoder.decodeInt(createByteBuffer(0x7f, 0xff, 0xff, 0xff, 0xff, 0x07), 7));
+    }
+
+
 }
 

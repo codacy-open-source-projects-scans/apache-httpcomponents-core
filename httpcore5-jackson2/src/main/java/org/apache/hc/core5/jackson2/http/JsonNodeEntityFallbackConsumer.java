@@ -31,72 +31,79 @@ import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+
 import org.apache.hc.core5.concurrent.CallbackContribution;
 import org.apache.hc.core5.concurrent.FutureCallback;
-import org.apache.hc.core5.function.Supplier;
 import org.apache.hc.core5.http.ContentType;
 import org.apache.hc.core5.http.EntityDetails;
 import org.apache.hc.core5.http.Header;
 import org.apache.hc.core5.http.HttpException;
-import org.apache.hc.core5.http.HttpMessage;
-import org.apache.hc.core5.http.UnsupportedMediaTypeException;
-import org.apache.hc.core5.http.nio.AsyncDataConsumer;
 import org.apache.hc.core5.http.nio.AsyncEntityConsumer;
 import org.apache.hc.core5.http.nio.CapacityChannel;
-import org.apache.hc.core5.http.nio.entity.DiscardingEntityConsumer;
-import org.apache.hc.core5.http.protocol.HttpContext;
+import org.apache.hc.core5.http.nio.entity.StringAsyncEntityConsumer;
 import org.apache.hc.core5.util.Args;
 
-abstract class AbstractJsonMessageConsumer<H extends HttpMessage, T> implements AsyncDataConsumer {
+/**
+ * {@link org.apache.hc.core5.http.nio.AsyncEntityConsumer} implementation that
+ * de-serializes incoming HTTP message entity into an {@link JsonNode} instance
+ * if the message content type is {@link ContentType#APPLICATION_JSON} or as a single text
+ * {@link JsonNode} if the message content type is not supported. This entity consumer
+ * is primarily intended for handling of response messages that represent a client or a server
+ * error (such as a response with 4xx or 5xx status).
+ *
+ * @since 5.5
+ */
+public class JsonNodeEntityFallbackConsumer implements AsyncEntityConsumer<JsonNode> {
 
-    private final Supplier<AsyncEntityConsumer<T>> jsonConsumerSupplier;
+    private final JsonFactory jsonFactory;
     private final AtomicReference<AsyncEntityConsumer<?>> entityConsumerRef;
 
-    public AbstractJsonMessageConsumer(final Supplier<AsyncEntityConsumer<T>> jsonConsumerSupplier) {
-        this.jsonConsumerSupplier = Args.notNull(jsonConsumerSupplier, "Json consumer supplier");
+    public JsonNodeEntityFallbackConsumer(final JsonFactory jsonFactory) {
+        this.jsonFactory = Args.notNull(jsonFactory, "Json factory");
         this.entityConsumerRef = new AtomicReference<>();
     }
 
-    protected <E> void handleContent(final AsyncEntityConsumer<E> entityConsumer,
-                                     final EntityDetails entityDetails,
-                                     final FutureCallback<E> resultCallback) throws HttpException, IOException {
-        entityConsumerRef.set(entityConsumer);
-        entityConsumer.streamStart(entityDetails, resultCallback);
+    public JsonNodeEntityFallbackConsumer(final ObjectMapper objectMapper) {
+        this.jsonFactory = Args.notNull(objectMapper, "Object mapper").getFactory();
+        this.entityConsumerRef = new AtomicReference<>();
     }
 
-    protected void consumeMessage(final H messageHead,
-                                  final EntityDetails entityDetails,
-                                  final HttpContext context,
-                                  final FutureCallback<T> resultCallback) throws HttpException, IOException {
-        if (entityDetails == null) {
-            resultCallback.completed(null);
-            return;
-        }
-
+    @Override
+    public void streamStart(final EntityDetails entityDetails,
+                            final FutureCallback<JsonNode> resultCallback) throws HttpException, IOException {
         final ContentType contentType = ContentType.parseLenient(entityDetails.getContentType());
         if (contentType == null || ContentType.APPLICATION_JSON.isSameMimeType(contentType)) {
-            final AsyncEntityConsumer<T> entityConsumer = jsonConsumerSupplier.get();
+            final AsyncEntityConsumer<JsonNode> entityConsumer = new JsonNodeEntityConsumer(jsonFactory);
             entityConsumerRef.set(entityConsumer);
-            entityConsumer.streamStart(entityDetails, new CallbackContribution<T>(resultCallback) {
+            entityConsumer.streamStart(entityDetails, new CallbackContribution<JsonNode>(resultCallback) {
 
                 @Override
-                public void completed(final T result) {
+                public void completed(final JsonNode result) {
                     resultCallback.completed(result);
                 }
 
             });
         } else {
-            final AsyncEntityConsumer<T> entityConsumer = new DiscardingEntityConsumer<>();
+            final AsyncEntityConsumer<String> entityConsumer = new StringAsyncEntityConsumer();
             entityConsumerRef.set(entityConsumer);
-            entityConsumer.streamStart(entityDetails, new CallbackContribution<T>(resultCallback) {
+            entityConsumer.streamStart(entityDetails, new CallbackContribution<String>(resultCallback) {
 
                 @Override
-                public void completed(final T ignore) {
-                    resultCallback.failed(new UnsupportedMediaTypeException(contentType));
+                public void completed(final String result) {
+                    resultCallback.completed(JsonNodeFactory.instance.textNode(result));
                 }
 
             });
         }
+    }
+
+    @Override
+    public JsonNode getContent() {
+        return null;
     }
 
     @Override
