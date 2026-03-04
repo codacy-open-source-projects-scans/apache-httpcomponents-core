@@ -1863,4 +1863,107 @@ class TestAbstractH2StreamMultiplexer {
         Assertions.assertEquals(H2Error.PROTOCOL_ERROR, H2Error.getByCode(((H2StreamResetException) cause).getCode()));
     }
 
+    @Test
+    void testHeadersWithPriorityFlagAndShortPayloadRejected() throws Exception {
+        final AbstractH2StreamMultiplexer mux = new H2StreamMultiplexerImpl(
+                protocolIOSession,
+                FRAME_FACTORY,
+                StreamIdGenerator.ODD,
+                httpProcessor,
+                CharCodingConfig.DEFAULT,
+                H2Config.custom().build(),
+                h2StreamListener,
+                () -> streamHandler);
+
+        final RawFrame headers = new RawFrame(
+                FrameType.HEADERS.getValue(),
+                FrameFlag.PRIORITY.getValue() | FrameFlag.END_HEADERS.getValue(),
+                2,
+                ByteBuffer.allocate(0));
+
+        final H2ConnectionException ex = Assertions.assertThrows(
+                H2ConnectionException.class,
+                () -> mux.onInput(ByteBuffer.wrap(encodeFrame(headers))));
+
+        Assertions.assertEquals(H2Error.FRAME_SIZE_ERROR, H2Error.getByCode(ex.getCode()));
+    }
+
+
+    @Test
+    void testFirstPeerFrameMustBeSettings() throws Exception {
+        final AbstractH2StreamMultiplexer mux = new H2StreamMultiplexerImpl(
+                protocolIOSession,
+                FRAME_FACTORY,
+                StreamIdGenerator.ODD,
+                httpProcessor,
+                CharCodingConfig.DEFAULT,
+                H2Config.custom().build(),
+                h2StreamListener,
+                () -> streamHandler);
+
+        mux.onConnect();
+
+        final RawFrame ping = new RawFrame(FrameType.PING.getValue(), 0, 0, ByteBuffer.wrap(new byte[8]));
+        final H2ConnectionException ex = Assertions.assertThrows(
+                H2ConnectionException.class,
+                () -> mux.onInput(ByteBuffer.wrap(encodeFrame(ping))));
+        Assertions.assertEquals(H2Error.PROTOCOL_ERROR, H2Error.getByCode(ex.getCode()));
+    }
+
+    @Test
+    void testFirstPeerSettingsAckRejected() throws Exception {
+        final AbstractH2StreamMultiplexer mux = new H2StreamMultiplexerImpl(
+                protocolIOSession,
+                FRAME_FACTORY,
+                StreamIdGenerator.ODD,
+                httpProcessor,
+                CharCodingConfig.DEFAULT,
+                H2Config.custom().build(),
+                h2StreamListener,
+                () -> streamHandler);
+
+        mux.onConnect();
+
+        final RawFrame settingsAck = new RawFrame(FrameType.SETTINGS.getValue(), FrameFlag.ACK.getValue(), 0, null);
+        final H2ConnectionException ex = Assertions.assertThrows(
+                H2ConnectionException.class,
+                () -> mux.onInput(ByteBuffer.wrap(encodeFrame(settingsAck))));
+        Assertions.assertEquals(H2Error.PROTOCOL_ERROR, H2Error.getByCode(ex.getCode()));
+    }
+
+    @Test
+    void testInputRstStreamWithInvalidLengthOnUnseenStreamRejected() throws Exception {
+        Mockito.when(protocolIOSession.write(ArgumentMatchers.any(ByteBuffer.class)))
+                .thenAnswer(invocation -> {
+                    final ByteBuffer buffer = invocation.getArgument(0, ByteBuffer.class);
+                    final int remaining = buffer.remaining();
+                    buffer.position(buffer.limit());
+                    return remaining;
+                });
+        Mockito.doNothing().when(protocolIOSession).setEvent(ArgumentMatchers.anyInt());
+        Mockito.doNothing().when(protocolIOSession).clearEvent(ArgumentMatchers.anyInt());
+
+        final AbstractH2StreamMultiplexer mux = new H2StreamMultiplexerImpl(
+                protocolIOSession,
+                FRAME_FACTORY,
+                StreamIdGenerator.ODD,
+                httpProcessor,
+                CharCodingConfig.DEFAULT,
+                H2Config.custom().build(),
+                h2StreamListener,
+                () -> streamHandler);
+
+        mux.onConnect();
+        completeSettingsHandshake(mux);
+
+        final RawFrame badRst = new RawFrame(FrameType.RST_STREAM.getValue(), 0, 1, null);
+
+        final H2ConnectionException ex = Assertions.assertThrows(
+                H2ConnectionException.class,
+                () -> mux.onInput(ByteBuffer.wrap(encodeFrame(badRst))));
+
+        Assertions.assertEquals(H2Error.FRAME_SIZE_ERROR, H2Error.getByCode(ex.getCode()));
+    }
+
+
 }
