@@ -37,4 +37,5 @@ import org.apache.hc.core5.reactor.IOEventHandler;
  */
 @Internal
 public interface HttpConnectionEventHandler extends IOEventHandler, HttpConnection {
+
 }

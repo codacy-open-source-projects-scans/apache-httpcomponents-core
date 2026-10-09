@@ -32,17 +32,18 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import org.apache.hc.core5.reactor.ssl.SSLSessionVerifier;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.jupiter.MockitoExtension;
 
+@ExtendWith(MockitoExtension.class)
 class BasicServerTlsStrategyTest {
 
     @Mock
-    private SSLSessionVerifier sslSessionVerifier;
+    SSLSessionVerifier sslSessionVerifier;
 
     @BeforeEach
     void prepareMocks() {
-        MockitoAnnotations.openMocks(this);
     }
 
     @Test

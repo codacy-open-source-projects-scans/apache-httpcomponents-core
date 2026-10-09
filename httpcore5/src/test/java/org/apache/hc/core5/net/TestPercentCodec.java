@@ -30,6 +30,7 @@ package org.apache.hc.core5.net;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.nio.charset.StandardCharsets;
+import java.util.BitSet;
 import java.util.stream.Stream;
 
 import org.junit.jupiter.api.Test;
@@ -48,6 +49,15 @@ class TestPercentCodec {
         PercentCodec.encode(buf, " ~ ", StandardCharsets.UTF_8);
         PercentCodec.encode(buf, "huh?", StandardCharsets.UTF_8);
         assertEquals("blah%21%20~%20huh%3F", buf.toString());
+    }
+
+    @Test
+    void testLowerCaseHexEncoding() {
+        final BitSet safeChars = new BitSet(256);
+        safeChars.set(' ');
+        final PercentCodec codec = new PercentCodec(safeChars, true);
+        assertEquals(" %c3%bc%22%25", codec.encode(" ü\"%"));
+        assertEquals("%C3%BC", PercentCodec.RFC3986.encode("ü"));
     }
 
     @Test
@@ -114,6 +124,28 @@ class TestPercentCodec {
         assertEquals("%2A", PercentCodec.encode("*", StandardCharsets.UTF_8));
         assertEquals("%21", PercentCodec.encode("!", StandardCharsets.UTF_8));
         assertEquals("%7C", PercentCodec.encode("|", StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void decodeIllegalChars() {
+        assertEquals(
+                "1?2?3?4",
+                PercentCodec.decode("1\u012E2\u012E3\u012E4", StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void testDecodeDoesNotCombineEscapedBytesAcrossLiteralCharacters() {
+        assertEquals(
+                "\uFFFDx\uFFFD",
+                PercentCodec.decode("%C3x%A4", StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void testEncodeHonorsUtf16Charset() {
+        assertEquals(
+                "%FE%FF%00a%00b%00c",
+                PercentCodec.encode("abc", StandardCharsets.UTF_16));
+
     }
 
 }

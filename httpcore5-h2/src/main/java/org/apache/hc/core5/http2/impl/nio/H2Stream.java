@@ -32,7 +32,6 @@ import java.nio.ByteBuffer;
 import java.nio.channels.CancelledKeyException;
 import java.nio.charset.CharacterCodingException;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -51,7 +50,7 @@ import org.apache.hc.core5.util.Timeout;
 
 class H2Stream implements StreamControl {
 
-    private static final long LINGER_TIME_NANOS = TimeUnit.SECONDS.toNanos(1);
+    private static final long LINGER_TIME = 1000; // 1 second
 
     private final H2StreamChannel channel;
     private final H2StreamHandler handler;
@@ -125,8 +124,8 @@ class H2Stream implements StreamControl {
     }
 
     private boolean isPastLingerDeadline() {
-        final long localResetNanos = channel.getLocalResetNanos();
-        return localResetNanos != Long.MIN_VALUE && System.nanoTime() - localResetNanos > LINGER_TIME_NANOS;
+        final long localResetTime = channel.getLocalResetTime();
+        return localResetTime > 0 && localResetTime + LINGER_TIME < System.currentTimeMillis();
     }
 
     boolean isClosedPastLingerDeadline() {
@@ -266,6 +265,16 @@ class H2Stream implements StreamControl {
         localReset(new H2StreamResetException(H2Error.CANCEL, "Cancelled"));
     }
 
+    /**
+     * Resets a cancelled stream that has already sent END_STREAM. Such a stream
+     * produces no more output, so it would otherwise wait for a peer frame.
+     */
+    void resetIfCancelled() throws IOException {
+        if (cancelled.get() && channel.isLocalClosed() && !isClosed()) {
+            localResetCancelled();
+        }
+    }
+
     void handle(final HttpException ex) throws IOException, HttpException {
         handler.handle(ex, remoteClosed);
     }
@@ -288,6 +297,7 @@ class H2Stream implements StreamControl {
     boolean abortGracefully() throws IOException {
         if (!isLocalClosed() && isRemoteClosed()) {
             channel.endStream();
+            handler.outputAborted();
             releaseResources();
             return true;
         } else {

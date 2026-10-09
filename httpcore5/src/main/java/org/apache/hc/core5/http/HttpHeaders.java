@@ -49,6 +49,13 @@ public final class HttpHeaders {
     public static final String ACCEPT_RANGES = "Accept-Ranges";
 
     /**
+     * The RFC 10008 {@code Accept-Query} response header field name.
+     *
+     * @since 5.5
+     */
+    public static final String ACCEPT_QUERY = "Accept-Query";
+
+    /**
      * The CORS {@code Access-Control-Allow-Credentials} response header field name.
      */
     public static final String ACCESS_CONTROL_ALLOW_CREDENTIALS = "Access-Control-Allow-Credentials";
@@ -90,6 +97,13 @@ public final class HttpHeaders {
     public static final String CACHE_CONTROL = "Cache-Control";
 
     public static final String CONNECTION = "Connection";
+
+    /**
+     * The RFC 9530 {@code Content-Digest} field name.
+     *
+     * @since 5.5
+     */
+    public static final String CONTENT_DIGEST = "Content-Digest";
 
     public static final String CONTENT_ENCODING = "Content-Encoding";
     /**
@@ -173,6 +187,13 @@ public final class HttpHeaders {
 
     public static final String REFERER = "Referer";
 
+    /**
+     * The RFC 9530 {@code Repr-Digest} field name.
+     *
+     * @since 5.5
+     */
+    public static final String REPR_DIGEST = "Repr-Digest";
+
     public static final String RETRY_AFTER = "Retry-After";
 
     public static final String SERVER = "Server";
@@ -199,6 +220,20 @@ public final class HttpHeaders {
     public static final String VARY = "Vary";
 
     public static final String VIA = "Via";
+
+    /**
+     * The RFC 9530 {@code Want-Content-Digest} field name.
+     *
+     * @since 5.5
+     */
+    public static final String WANT_CONTENT_DIGEST = "Want-Content-Digest";
+
+    /**
+     * The RFC 9530 {@code Want-Repr-Digest} field name.
+     *
+     * @since 5.5
+     */
+    public static final String WANT_REPR_DIGEST = "Want-Repr-Digest";
 
     public static final String WARNING = "Warning";
 

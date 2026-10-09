@@ -33,9 +33,11 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.RandomAccess;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.UnaryOperator;
 
@@ -44,6 +46,7 @@ import org.apache.hc.core5.http.FormattedHeader;
 import org.apache.hc.core5.http.Header;
 import org.apache.hc.core5.http.HeaderElement;
 import org.apache.hc.core5.http.HeaderElements;
+import org.apache.hc.core5.http.HttpException;
 import org.apache.hc.core5.http.HttpHeaders;
 import org.apache.hc.core5.http.HttpMessage;
 import org.apache.hc.core5.http.HttpResponse;
@@ -51,6 +54,7 @@ import org.apache.hc.core5.http.HttpStatus;
 import org.apache.hc.core5.http.MessageHeaders;
 import org.apache.hc.core5.http.Method;
 import org.apache.hc.core5.http.NameValuePair;
+import org.apache.hc.core5.http.ParseException;
 import org.apache.hc.core5.http.ProtocolException;
 import org.apache.hc.core5.util.Args;
 import org.apache.hc.core5.util.CharArrayBuffer;
@@ -62,6 +66,8 @@ import org.apache.hc.core5.util.Tokenizer;
  * @since 5.0
  */
 public class MessageSupport {
+
+    private static final Tokenizer TK = Tokenizer.INSTANCE;
 
     private MessageSupport() {
         // Do not allow utility class to be instantiated.
@@ -75,12 +81,27 @@ public class MessageSupport {
         if (tokens == null) {
             return;
         }
-        for (int i = 0; i < tokens.size(); i++) {
-            final String element = transformation != null ? transformation.apply(tokens.get(i)) : tokens.get(i);
-            if (i > 0) {
-                dst.append(", ");
+        if (tokens instanceof RandomAccess) {
+            for (int i = 0; i < tokens.size(); i++) {
+                final String token = tokens.get(i);
+                final String element = transformation != null ? transformation.apply(token) : token;
+                if (i > 0) {
+                    dst.append(", ");
+                }
+                dst.append(element);
             }
-            dst.append(element);
+        } else {
+            final Iterator<String> iterator = tokens.iterator();
+            boolean first = true;
+            while (iterator.hasNext()) {
+                final String token = iterator.next();
+                final String element = transformation != null ? transformation.apply(token) : token;
+                if (!first) {
+                    dst.append(", ");
+                }
+                dst.append(element);
+                first = false;
+            }
         }
     }
 
@@ -203,6 +224,43 @@ public class MessageSupport {
     }
 
     /**
+     * @since 5.5
+     */
+    public static <T> T parseHeaderValue(final Header header, final BiFunction<CharSequence, ParserCursor, T> transformation) {
+        Args.notNull(header, "Header");
+        Args.notNull(transformation, "Transformation");
+        if (header instanceof FormattedHeader) {
+            final CharArrayBuffer buf = ((FormattedHeader) header).getBuffer();
+            final ParserCursor cursor = new ParserCursor(0, buf.length());
+            cursor.updatePos(((FormattedHeader) header).getValuePos());
+            return transformation.apply(buf, cursor);
+        } else {
+            final String value = header.getValue();
+            final ParserCursor cursor = new ParserCursor(0, value.length());
+            return transformation.apply(value, cursor);
+        }
+    }
+
+    /**
+     * @since 5.5
+     */
+    public static <T> T parseHeaderValueStrict(
+            final Header header, final ElementTransformation<T> transformation) throws ParseException {
+        Args.notNull(header, "Header");
+        Args.notNull(transformation, "Transformation");
+        if (header instanceof FormattedHeader) {
+            final CharArrayBuffer buf = ((FormattedHeader) header).getBuffer();
+            final ParserCursor cursor = new ParserCursor(0, buf.length());
+            cursor.updatePos(((FormattedHeader) header).getValuePos());
+            return transformation.apply(buf, cursor);
+        } else {
+            final String value = header.getValue();
+            final ParserCursor cursor = new ParserCursor(0, value.length());
+            return transformation.apply(value, cursor);
+        }
+    }
+
+    /**
      * @since 5.4
      */
     public static void parseHeaders(final MessageHeaders headers, final String name, final BiConsumer<CharSequence, ParserCursor> consumer) {
@@ -225,6 +283,7 @@ public class MessageSupport {
         Args.notNull(consumer, "Consumer");
         while (!cursor.atEnd()) {
             consumer.accept(src, cursor);
+            TK.skipWhiteSpace(src, cursor);
             if (!cursor.atEnd()) {
                 final char ch = src.charAt(cursor.getPos());
                 if (ch == ',') {
@@ -248,7 +307,7 @@ public class MessageSupport {
      * @since 5.5
      */
     public static void parseHeaderStrict(final Header header,
-                                         final HeaderElementConsumer consumer) throws ProtocolException {
+                                         final ElementConsumer consumer) throws ParseException {
         Args.notNull(header, "Header");
         if (header instanceof FormattedHeader) {
             final CharArrayBuffer buf = ((FormattedHeader) header).getBuffer();
@@ -267,7 +326,7 @@ public class MessageSupport {
      */
     public static void parseHeadersStrict(final MessageHeaders headers,
                                           final String name,
-                                          final HeaderElementConsumer consumer) throws ProtocolException {
+                                          final ElementConsumer consumer) throws ParseException {
         Args.notNull(headers, "Message headers");
         Args.notBlank(name, "Header name");
         final Iterator<Header> it = headers.headerIterator(name);
@@ -281,16 +340,20 @@ public class MessageSupport {
      */
     public static void parseElementListStrict(final CharSequence src,
                                               final ParserCursor cursor,
-                                              final HeaderElementConsumer consumer) throws ProtocolException {
+                                              final ElementConsumer consumer) throws ParseException {
         Args.notNull(src, "Source");
         Args.notNull(cursor, "Cursor");
         Args.notNull(consumer, "Consumer");
         while (!cursor.atEnd()) {
             consumer.accept(src, cursor);
+            TK.skipWhiteSpace(src, cursor);
             if (!cursor.atEnd()) {
                 final char ch = src.charAt(cursor.getPos());
                 if (ch == ',') {
                     cursor.updatePos(cursor.getPos() + 1);
+                } else {
+                    throw new ParseException("Invalid header element",
+                            src, cursor.getLowerBound(), cursor.getUpperBound(), cursor.getPos());
                 }
             }
         }
@@ -301,7 +364,7 @@ public class MessageSupport {
      */
     public static void parseElementListStrict(final MessageHeaders headers,
                                               final String name,
-                                              final HeaderElementConsumer consumer) throws ProtocolException {
+                                              final ElementConsumer consumer) throws ParseException {
         parseHeadersStrict(headers, name, (charSequence, cursor) ->
                 parseElementListStrict(charSequence, cursor, consumer));
     }
@@ -313,10 +376,16 @@ public class MessageSupport {
                                    final ParserCursor cursor,
                                    final Tokenizer.Delimiter delimiterPredicate,
                                    final Consumer<String> consumer) {
-        parseElementList(src, cursor, (sequence, c) -> {
-            final String token = Tokenizer.INSTANCE.parseToken(src, c, delimiterPredicate);
+        while (!cursor.atEnd()) {
+            final String token = Tokenizer.INSTANCE.parseToken(src, cursor, delimiterPredicate);
             consumer.accept(token);
-        });
+            if (!cursor.atEnd()) {
+                final char ch = src.charAt(cursor.getPos());
+                if (delimiterPredicate != null && delimiterPredicate.test(ch)) {
+                    cursor.updatePos(cursor.getPos() + 1);
+                }
+            }
+        }
     }
 
     /**
@@ -393,12 +462,25 @@ public class MessageSupport {
         if (elements == null) {
             return;
         }
-        for (int i = 0; i < elements.size(); i++) {
-            final HeaderElement element = elements.get(i);
-            if (i > 0) {
-                dst.append(", ");
+        if (elements instanceof RandomAccess) {
+            for (int i = 0; i < elements.size(); i++) {
+                final HeaderElement element = elements.get(i);
+                if (i > 0) {
+                    dst.append(", ");
+                }
+                BasicHeaderValueFormatter.INSTANCE.formatHeaderElement(dst, element, false);
             }
-            BasicHeaderValueFormatter.INSTANCE.formatHeaderElement(dst, element, false);
+        } else {
+            final Iterator<HeaderElement> iterator = elements.iterator();
+            boolean first = true;
+            while (iterator.hasNext()) {
+                final HeaderElement element = iterator.next();
+                if (!first) {
+                    dst.append(", ");
+                }
+                BasicHeaderValueFormatter.INSTANCE.formatHeaderElement(dst, element, false);
+                first = false;
+            }
         }
     }
 
@@ -497,12 +579,25 @@ public class MessageSupport {
         if (params == null) {
             return;
         }
-        for (int i = 0; i < params.size(); i++) {
-            final NameValuePair param = params.get(i);
-            if (i > 0) {
-                dst.append("; ");
+        if (params instanceof RandomAccess) {
+            for (int i = 0; i < params.size(); i++) {
+                final NameValuePair param = params.get(i);
+                if (i > 0) {
+                    dst.append("; ");
+                }
+                BasicHeaderValueFormatter.INSTANCE.formatNameValuePair(dst, param, false);
             }
-            BasicHeaderValueFormatter.INSTANCE.formatNameValuePair(dst, param, false);
+        } else {
+            final Iterator<NameValuePair> iterator = params.iterator();
+            boolean first = true;
+            while (iterator.hasNext()) {
+                final NameValuePair param = iterator.next();
+                if (!first) {
+                    dst.append("; ");
+                }
+                BasicHeaderValueFormatter.INSTANCE.formatNameValuePair(dst, param, false);
+                first = false;
+            }
         }
     }
 
@@ -635,6 +730,30 @@ public class MessageSupport {
             return result;
         }
         return HOP_BY_HOP;
+    }
+
+    /**
+     * @since 5.5
+     */
+    public static long getContentLength(final HttpMessage message) throws HttpException {
+        Args.notNull(message, "HTTP message");
+        if (message.countHeaders(HttpHeaders.CONTENT_LENGTH) > 1) {
+            throw new ProtocolException("Multiple Content-Length headers");
+        }
+        final Header contentLengthHeader = message.getFirstHeader(HttpHeaders.CONTENT_LENGTH);
+        if (contentLengthHeader != null) {
+            final String s = contentLengthHeader.getValue();
+            try {
+                final long len = Long.parseLong(s);
+                if (len < 0) {
+                    throw new ProtocolException("Negative content length: " + s);
+                }
+                return len;
+            } catch (final NumberFormatException e) {
+                throw new ProtocolException("Invalid content length: " + s);
+            }
+        }
+        return -1;
     }
 
 }

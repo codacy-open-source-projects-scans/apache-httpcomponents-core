@@ -37,7 +37,6 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedDeque;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
@@ -147,13 +146,13 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
     private volatile boolean peerNoRfc7540Priorities;
 
 
-    private static final long STREAM_TIMEOUT_GRANULARITY_NANOS = TimeUnit.SECONDS.toNanos(1);
-    private long lastStreamTimeoutCheckNanos;
+    private static final long STREAM_TIMEOUT_GRANULARITY_MILLIS = 1000;
+    private long lastStreamTimeoutCheckMillis;
 
-    private static final long VALIDATE_AFTER_INACTIVITY_GRANULARITY_NANOS = TimeUnit.SECONDS.toNanos(1);
+    private static final long VALIDATE_AFTER_INACTIVITY_GRANULARITY_MILLIS = 1000;
     private final Timeout validateAfterInactivity;
     private final Timeout pingAckTimeout;
-    private volatile long lastActivityNanos;
+    private volatile long lastActivityTime;
 
     AbstractH2StreamMultiplexer(
             final ProtocolIOSession ioSession,
@@ -211,11 +210,10 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
         this.initInputWinSize = H2Config.INIT.getInitialWindowSize();
         this.initOutputWinSize = H2Config.INIT.getInitialWindowSize();
 
-        this.hPackDecoder.setMaxListSize(H2Config.INIT.getMaxHeaderListSize());
-
+        this.hPackDecoder.setMaxListSize(this.localConfig.getMaxHeaderListSize());
         this.lowMark = H2Config.INIT.getInitialWindowSize() / 2;
         this.streamListener = streamListener;
-        this.lastActivityNanos = System.nanoTime();
+        this.lastActivityTime = System.currentTimeMillis();
         this.validateAfterInactivity = validateAfterInactivity;
         this.pingAckTimeout = Args.notNull(pingAckTimeout, "PING ACK timeout");
     }
@@ -527,6 +525,11 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
 
             if (connOutputWindow.get() > 0 && remoteSettingState == SettingsHandshake.ACKED) {
                 produceOutput();
+            } else {
+                // RST_STREAM is not subject to flow control
+                for (final Iterator<H2Stream> it = streams.iterator(); it.hasNext(); ) {
+                    it.next().resetIfCancelled();
+                }
             }
             final int pendingOutputRequests = outputRequests.get();
             boolean outputPending = false;
@@ -556,8 +559,8 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
 
         if (connState.compareTo(ConnectionHandshake.ACTIVE) <= 0 && remoteSettingState == SettingsHandshake.ACKED) {
             final long t = TimeValue.isPositive(validateAfterInactivity) ?
-                    Math.max(validateAfterInactivity.toNanoseconds(), VALIDATE_AFTER_INACTIVITY_GRANULARITY_NANOS) : 0;
-            final boolean hasBeenIdleTooLong = t > 0 && System.nanoTime() - lastActivityNanos > t;
+                    Math.max(validateAfterInactivity.toMilliseconds(), VALIDATE_AFTER_INACTIVITY_GRANULARITY_MILLIS) : 0;
+            final boolean hasBeenIdleTooLong = t > 0 && System.currentTimeMillis() - lastActivityTime > t;
             if (hasBeenIdleTooLong && ioSession.hasCommands() && pingHandlers.isEmpty()) {
                 final Timeout socketTimeout = ioSession.getSocketTimeout();
                 ioSession.setSocketTimeout(pingAckTimeout);
@@ -572,7 +575,7 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                 })));
                 return;
             }
-            while (streams.getLocalCount() < remoteConfig.getMaxConcurrentStreams()) {
+            while (streams.getLocalCount() < Integer.toUnsignedLong(remoteConfig.getMaxConcurrentStreams())) {
                 final Command command = ioSession.poll();
                 if (command == null) {
                     break;
@@ -928,7 +931,8 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                         try {
                             updateOutputWindow(streamId, stream.getOutputWindow(), delta);
                         } catch (final ArithmeticException ex) {
-                            throw new H2ConnectionException(H2Error.FLOW_CONTROL_ERROR, ex.getMessage());
+                            stream.localReset(new H2StreamResetException(H2Error.FLOW_CONTROL_ERROR, ex.getMessage()));
+                            requestSessionOutput();
                         }
                     }
                 }
@@ -1084,7 +1088,7 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                         for (final Iterator<H2Stream> it = streams.iterator(); it.hasNext(); ) {
                             final H2Stream stream = it.next();
                             final int activeStreamId = stream.getId();
-                            if (!streams.isSameSide(activeStreamId) && activeStreamId > processedLocalStreamId) {
+                            if (streams.isSameSide(activeStreamId) && activeStreamId > processedLocalStreamId) {
                                 stream.fail(new RequestNotExecutedException());
                                 it.remove();
                             }
@@ -1134,6 +1138,9 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
     }
 
     private void consumeDataFrame(final RawFrame frame, final H2Stream stream) throws HttpException, IOException {
+        if (stream.isReserved()) {
+            throw new H2ConnectionException(H2Error.PROTOCOL_ERROR, "Unexpected DATA frame on reserved stream");
+        }
         if (stream.isRemoteClosed()) {
             throw new H2StreamResetException(H2Error.STREAM_CLOSED, "Stream already closed");
         }
@@ -1281,7 +1288,7 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                     case INITIAL_WINDOW_SIZE:
                         if (value < 0) {
                             throw new H2ConnectionException(H2Error.FLOW_CONTROL_ERROR,
-                                    "Invalid initial window size: " + (value & 0xffffffffL));
+                                    "Invalid initial window size: " + Integer.toUnsignedLong(value));
                         }
                         try {
                             configBuilder.setInitialWindowSize(value);
@@ -1311,10 +1318,10 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
         }
         applyRemoteSettings(configBuilder.build());
     }
-
     private void produceOutput() throws HttpException, IOException {
         for (final Iterator<H2Stream> it = streams.iterator(); it.hasNext(); ) {
             final H2Stream stream = it.next();
+            stream.resetIfCancelled();
             if (!stream.isLocalClosed() && !stream.isReserved() && stream.getOutputWindow().get() > 0) {
                 stream.produceOutput();
             }
@@ -1332,11 +1339,13 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
 
     private void applyRemoteSettings(final H2Config config) throws H2ConnectionException {
         remoteConfig = config;
-
-        hPackEncoder.setMaxTableSize(remoteConfig.getHeaderTableSize());
+        // The peer's HEADER_TABLE_SIZE is an upper bound for the encoder. Keep the local
+        // dynamic table bounded to limit memory usage and lookup cost per connection.
+        hPackEncoder.setMaxTableSize((int) Math.min(
+                Integer.toUnsignedLong(remoteConfig.getHeaderTableSize()),
+                H2Config.INIT.getHeaderTableSize()));
         final int delta = remoteConfig.getInitialWindowSize() - initOutputWinSize;
         initOutputWinSize = remoteConfig.getInitialWindowSize();
-
         final int maxFrameSize = remoteConfig.getMaxFrameSize();
         if (maxFrameSize < outputBuffer.getMaxFramePayloadSize()) {
             try {
@@ -1345,7 +1354,6 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                 throw new H2ConnectionException(H2Error.INTERNAL_ERROR, "Failure resizing the frame output buffer");
             }
         }
-
         if (delta != 0) {
             if (!streams.isEmpty()) {
                 for (final Iterator<H2Stream> it = streams.iterator(); it.hasNext(); ) {
@@ -1359,7 +1367,6 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
             }
         }
     }
-
     private void applyLocalSettings() throws H2ConnectionException {
         hPackDecoder.setMaxTableSize(localConfig.getHeaderTableSize());
         hPackDecoder.setMaxListSize(localConfig.getMaxHeaderListSize());
@@ -1378,6 +1385,13 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
             }
         }
         lowMark = initInputWinSize / 2;
+    }
+
+    /**
+     * @since 5.5
+     */
+    public int streamCount() {
+        return streams.getCount();
     }
 
     @Override
@@ -1443,7 +1457,7 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                 .append(", connInputWindow=").append(connInputWindow)
                 .append(", connOutputWindow=").append(connOutputWindow)
                 .append(", outputQueue=").append(outputQueue.size())
-                .append(", streams.localCoubt=").append(streams.getLocalCount())
+                .append(", streams.localCount=").append(streams.getLocalCount())
                 .append(", streams.remoteCount=").append(streams.getRemoteCount())
                 .append(", streams.lastLocal=").append(streams.getLastLocalId())
                 .append(", streams.lastRemote=").append(streams.getLastRemoteId());
@@ -1527,7 +1541,7 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
         private final AtomicInteger outputWindow;
 
         private volatile boolean localClosed;
-        private volatile long localResetNanos = Long.MIN_VALUE;
+        private volatile long localResetTime;
 
         H2StreamChannelImpl(final int id, final int initialInputWindowSize, final int initialOutputWindowSize) {
             this.id = id;
@@ -1621,7 +1635,6 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
 
         @Override
         public void update(final int increment) throws IOException {
-            incrementInputCapacity(0, connInputWindow, increment);
             incrementInputCapacity(id, inputWindow, increment);
         }
 
@@ -1693,7 +1706,7 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
                     return false;
                 }
                 localClosed = true;
-                localResetNanos = System.nanoTime();
+                localResetTime = System.currentTimeMillis();
 
                 final RawFrame resetStream = frameFactory.createResetStream(id, code);
                 commitFrameInternal(resetStream);
@@ -1704,8 +1717,8 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
         }
 
         @Override
-        public long getLocalResetNanos() {
-            return localResetNanos;
+        public long getLocalResetTime() {
+            return localResetTime;
         }
 
         @Override
@@ -1760,14 +1773,14 @@ abstract class AbstractH2StreamMultiplexer implements Identifiable, HttpConnecti
     }
 
     private void validateStreamTimeouts() throws IOException {
-        final long nowNanos = System.nanoTime();
-        if ((nowNanos - lastStreamTimeoutCheckNanos) >= STREAM_TIMEOUT_GRANULARITY_NANOS) {
-            lastStreamTimeoutCheckNanos = nowNanos;
-            checkStreamTimeouts(nowNanos);
+        final long nowMillis = System.currentTimeMillis();
+        if ((nowMillis - lastStreamTimeoutCheckMillis) >= STREAM_TIMEOUT_GRANULARITY_MILLIS) {
+            lastStreamTimeoutCheckMillis = nowMillis;
+            checkStreamTimeouts(System.nanoTime());
         }
     }
 
     private void updateLastActivity() {
-        this.lastActivityNanos = System.nanoTime();
+        this.lastActivityTime = System.currentTimeMillis();
     }
 }

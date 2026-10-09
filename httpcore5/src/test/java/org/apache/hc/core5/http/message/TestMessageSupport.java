@@ -45,12 +45,16 @@ import org.apache.hc.core5.http.HttpHeaders;
 import org.apache.hc.core5.http.HttpMessage;
 import org.apache.hc.core5.http.HttpResponse;
 import org.apache.hc.core5.http.HttpStatus;
+import org.apache.hc.core5.http.HttpVersion;
 import org.apache.hc.core5.http.Method;
 import org.apache.hc.core5.http.NameValuePair;
+import org.apache.hc.core5.http.ParseException;
 import org.apache.hc.core5.http.ProtocolException;
+import org.apache.hc.core5.http.ProtocolVersion;
 import org.apache.hc.core5.http.io.entity.HttpEntities;
 import org.apache.hc.core5.http.support.BasicResponseBuilder;
 import org.apache.hc.core5.util.CharArrayBuffer;
+import org.apache.hc.core5.util.Tokenizer;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -108,6 +112,15 @@ class TestMessageSupport {
         final List<String> tokens = new ArrayList<>();
         MessageSupport.parseTokens(s, cursor, tokens::add);
         Assertions.assertEquals(Arrays.asList("a", "b", "c", "c"), tokens);
+    }
+
+    @Test
+    void testParseTokensWithConsumerAndCustomDelimiter() {
+        final String s = "a, b ;  c, c";
+        final ParserCursor cursor = new ParserCursor(0, s.length());
+        final List<String> tokens = new ArrayList<>();
+        MessageSupport.parseTokens(s, cursor, Tokenizer.delimiters(';'), tokens::add);
+        Assertions.assertEquals(Arrays.asList("a, b", "c, c"), tokens);
     }
 
     @Test
@@ -383,6 +396,27 @@ class TestMessageSupport {
     }
 
     @Test
+    void testParseHeadersElementWhitespace() throws Exception {
+        final HttpMessage message = new BasicHttpRequest(Method.GET, "/");
+        message.addHeader("Some-Header", "HTTP/1.0");
+        message.addHeader("Some-Header", "   HTTP/1.1  ");
+        message.addHeader("Some-Header", " HTTP/2   , HTTP/2.0   , HTTP/0.9  ");
+
+        final List<String> versions = new LinkedList<>();
+        MessageSupport.parseElementList(message, "Some-header", (charSequence, cursor) -> {
+            final String ver = copyToken(charSequence, cursor);
+            versions.add(ver);
+        });
+        Assertions.assertEquals(Arrays.asList(
+                        "HTTP/1.0",
+                        "HTTP/1.1",
+                        "HTTP/2",
+                        "HTTP/2.0",
+                        "HTTP/0.9"),
+                versions);
+    }
+
+    @Test
     void testParseHeadersStrict() throws Exception {
         final HttpMessage message = new BasicHttpRequest(Method.GET, "/");
         message.addHeader("Some-Header", "this");
@@ -403,16 +437,51 @@ class TestMessageSupport {
         });
         Assertions.assertEquals(Arrays.asList("this", "that", "this", "that", "what not"), tokens);
 
-        Assertions.assertThrows(ProtocolException.class, () ->
+        Assertions.assertThrows(ParseException.class, () ->
                 MessageSupport.parseElementListStrict(
                         message,
                         "Some-header",
                         (charSequence, cursor) -> {
                     final String token = copyToken(charSequence, cursor);
                     if (token.equalsIgnoreCase("what not")) {
-                        throw new ProtocolException("How awful!");
+                        throw new ParseException("How awful!");
                     }
                 }));
+    }
+
+    @Test
+    void testParseHeadersStrictElementWhitespace() throws Exception {
+        final HttpMessage message = new BasicHttpRequest(Method.GET, "/");
+        message.addHeader("Some-Header", "HTTP/1.0");
+        message.addHeader("Some-Header", "   HTTP/1.1  ");
+        message.addHeader("Some-Header", " HTTP/2   , HTTP/2.0   , HTTP/0.9  ");
+
+        final List<ProtocolVersion> versions = new LinkedList<>();
+        MessageSupport.parseElementListStrict(message, "Some-header", (charSequence, cursor) -> {
+            final ProtocolVersion ver = HttpVersion.parse(charSequence, cursor, Tokenizer.delimiters(','));
+            versions.add(ver);
+        });
+        Assertions.assertEquals(Arrays.asList(
+                HttpVersion.HTTP_1_0,
+                HttpVersion.HTTP_1_1,
+                HttpVersion.HTTP_2_0,
+                HttpVersion.HTTP_2_0,
+                HttpVersion.HTTP_0_9),
+                versions);
+    }
+
+    @Test
+    void testParseHeadersStrictInvalidElement() throws Exception {
+        final HttpMessage message = new BasicHttpRequest(Method.GET, "/");
+        message.addHeader("Some-Header", "HTTP/1.0");
+        message.addHeader("Some-Header", "   HTTP/1.1  HTTP/1.1");
+
+        Assertions.assertThrows(ProtocolException.class, () -> {
+                    MessageSupport.parseElementListStrict(message, "Some-header", (charSequence, cursor) -> {
+                        HttpVersion.parse(charSequence, cursor, Tokenizer.delimiters(','));
+                    });
+                }
+        );
     }
 
     @Test
@@ -476,6 +545,38 @@ class TestMessageSupport {
         Assertions.assertTrue(hopByHopConnectionSpecific.contains("Blah"));
         Assertions.assertTrue(hopByHopConnectionSpecific.contains("This"));
         Assertions.assertTrue(hopByHopConnectionSpecific.contains("That"));
+    }
+
+    @Test
+    void testMessageWithContentLength() throws Exception {
+        final HttpMessage message = new BasicHttpResponse(200);
+        message.addHeader("Content-Length", "100");
+        Assertions.assertEquals(100, MessageSupport.getContentLength(message));
+    }
+
+    @Test
+    void testMessageWithInvalidContentLength() {
+        final HttpMessage message = new BasicHttpResponse(200);
+        message.addHeader("Content-Length", "whatever");
+        Assertions.assertThrows(ProtocolException.class, () ->
+                MessageSupport.getContentLength(message));
+    }
+
+    @Test
+    void testMessageWithNegativeContentLength() {
+        final HttpMessage message = new BasicHttpResponse(200);
+        message.addHeader("Content-Length", "-10");
+        Assertions.assertThrows(ProtocolException.class, () ->
+                MessageSupport.getContentLength(message));
+    }
+
+    @Test
+    void testMessageWithMultipleContentLength() throws Exception {
+        final HttpMessage message = new BasicHttpResponse(200);
+        message.addHeader("Content-Length", "100");
+        message.addHeader("Content-Length", "100");
+        Assertions.assertThrows(ProtocolException.class, () ->
+                MessageSupport.getContentLength(message));
     }
 
 }

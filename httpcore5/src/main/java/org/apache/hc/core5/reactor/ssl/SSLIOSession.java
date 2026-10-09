@@ -93,7 +93,6 @@ public class SSLIOSession implements IOSession {
     private final AtomicInteger outboundClosedCount;
     private final AtomicReference<TLSHandShakeState> handshakeStateRef;
     private final IOEventHandler internalEventHandler;
-    private final int packetBufferSize;
 
     private int appEventMask;
 
@@ -180,9 +179,9 @@ public class SSLIOSession implements IOSession {
 
         final SSLSession sslSession = this.sslEngine.getSession();
         // Allocate buffers for network (encrypted) data
-        this.packetBufferSize = sslSession.getPacketBufferSize();
-        this.inEncrypted = SSLManagedBuffer.create(sslBufferMode, packetBufferSize);
-        this.outEncrypted = SSLManagedBuffer.create(sslBufferMode, packetBufferSize);
+        final int netBufferSize = sslSession.getPacketBufferSize();
+        this.inEncrypted = SSLManagedBuffer.create(sslBufferMode, netBufferSize);
+        this.outEncrypted = SSLManagedBuffer.create(sslBufferMode, netBufferSize);
 
         // Allocate buffers for application (unencrypted) data
         final int appBufferSize = sslSession.getApplicationBufferSize();
@@ -670,18 +669,9 @@ public class SSLIOSession implements IOSession {
             if (this.handshakeStateRef.get() == TLSHandShakeState.READY) {
                 return 0;
             }
-
-            for (;;) {
-                final ByteBuffer outEncryptedBuf = this.outEncrypted.acquire();
-                final SSLEngineResult result = doWrap(src, outEncryptedBuf);
-                if (result.getStatus() == SSLEngineResult.Status.BUFFER_OVERFLOW) {
-                    // We don't release the buffer here, it will be expanded (if needed)
-                    // and returned by the next attempt of SSLManagedBuffer#acquire() call.
-                    this.outEncrypted.ensureWriteable(packetBufferSize);
-                } else {
-                    return result.bytesConsumed();
-                }
-            }
+            final ByteBuffer outEncryptedBuf = this.outEncrypted.acquire();
+            final SSLEngineResult result = doWrap(src, outEncryptedBuf);
+            return result.bytesConsumed();
         } finally {
             this.session.getLock().unlock();
         }
@@ -865,6 +855,11 @@ public class SSLIOSession implements IOSession {
     }
 
     @Override
+    public long getInitiationTime() {
+        return this.session.getInitiationTime();
+    }
+
+    @Override
     public void updateReadTime() {
         this.session.updateReadTime();
     }
@@ -900,7 +895,10 @@ public class SSLIOSession implements IOSession {
 
     @Override
     public String toString() {
-        this.session.getLock().lock();
+        if (!this.session.getLock().tryLock()) {
+            // show simplified version for non-locked case
+            return this.session.getId() + "[" + this.status + "]";
+        }
         try {
             final StringBuilder buffer = new StringBuilder();
             buffer.append(this.session);

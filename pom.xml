@@ -27,15 +27,15 @@
   <parent>
     <groupId>org.apache.httpcomponents</groupId>
     <artifactId>httpcomponents-parent</artifactId>
-    <version>14</version>
+    <version>15</version>
   </parent>
   <modelVersion>4.0.0</modelVersion>
   <groupId>org.apache.httpcomponents.core5</groupId>
   <artifactId>httpcore5-parent</artifactId>
   <name>Apache HttpComponents Core</name>
-  <version>5.5-alpha2-SNAPSHOT</version>
+  <version>5.5-beta4-SNAPSHOT</version>
   <description>Apache HttpComponents Core is a library of components for building HTTP enabled services</description>
-  <url>https://hc.apache.org/httpcomponents-core-5.4.x/${project.version}/</url>
+  <url>https://hc.apache.org/httpcomponents-core-5.5.x/${project.version}/</url>
   <inceptionYear>2005</inceptionYear>
   <packaging>pom</packaging>
 
@@ -48,14 +48,14 @@
     <connection>scm:git:https://gitbox.apache.org/repos/asf/httpcomponents-core.git</connection>
     <developerConnection>scm:git:https://gitbox.apache.org/repos/asf/httpcomponents-core.git</developerConnection>
     <url>https://github.com/apache/httpcomponents-core/tree/${project.scm.tag}</url>
-    <tag>5.5-alpha2-SNAPSHOT</tag>
+    <tag>5.5-beta4-SNAPSHOT</tag>
   </scm>
 
   <distributionManagement>
     <site>
       <id>apache.website</id>
       <name>Apache HttpComponents Website</name>
-      <url>scm:svn:https://svn.apache.org/repos/asf/httpcomponents/site/components/httpcomponents-core-5.4.x/LATEST/</url>
+      <url>scm:svn:https://svn.apache.org/repos/asf/httpcomponents/site/components/httpcomponents-core-5.5.x/LATEST/</url>
     </site>
   </distributionManagement>
 
@@ -63,29 +63,32 @@
     <module>httpcore5</module>
     <module>httpcore5-h2</module>
     <module>httpcore5-reactive</module>
-    <module>httpcore5-jackson2</module>
     <module>httpcore5-testing</module>
   </modules>
 
   <properties>
-    <!-- Override parent 7 setting for deprecation (only - other settings stand)-->
-    <maven.compiler.source>1.8</maven.compiler.source>
-    <maven.compiler.target>1.8</maven.compiler.target>
+    <javaVersion>8</javaVersion>
+    <minimalJavaBuildVersion>17</minimalJavaBuildVersion>
+    <maven.compiler.source>${javaVersion}</maven.compiler.source>
+    <maven.compiler.target>${javaVersion}</maven.compiler.target>
     <maven.compiler.showDeprecation>true</maven.compiler.showDeprecation>
-    <!-- Maven itself runs on Java 17+, but compilation and tests can still use an older toolchain JDK. -->
-    <hc.build.toolchain.version>${maven.compiler.source}</hc.build.toolchain.version>
-    <conscrypt.version>2.5.2</conscrypt.version>
-    <junit.version>5.14.3</junit.version>
+    <api.comparison.version>5.4</api.comparison.version>
+
+    <!-- Disable animal sniffer. It has been superseded by compiler release version
+      To be completely removed -->
+    <animal.sniffer.skip>true</animal.sniffer.skip>
+
+    <conscrypt.version>2.7.0</conscrypt.version>
+    <jackson.version>3.2.3</jackson.version>
+    <junit.version>5.14.4</junit.version>
     <junit.migrationsupport.version>5.0.0</junit.migrationsupport.version>
     <mockito.version>4.11.0</mockito.version>
     <assertj.version>3.27.7</assertj.version>
     <slf4j.version>1.7.36</slf4j.version>
-    <log4j.version>2.25.3</log4j.version>
+    <log4j.version>2.26.1</log4j.version>
     <rxjava3.version>3.1.12</rxjava3.version>
     <testcontainers.version>1.21.4</testcontainers.version>
-    <api.comparison.version>5.4</api.comparison.version>
     <jmh.version>1.37</jmh.version>
-    <hc.animal-sniffer.signature.ignores>javax.net.ssl.SSLEngine,javax.net.ssl.SSLParameters,java.nio.ByteBuffer,java.nio.CharBuffer,jdk.net.ExtendedSocketOptions,jdk.net.Sockets</hc.animal-sniffer.signature.ignores>
   </properties>
 
   <dependencyManagement>
@@ -107,7 +110,7 @@
       </dependency>
       <dependency>
         <groupId>org.apache.httpcomponents.core5</groupId>
-        <artifactId>httpcore5-jackson2</artifactId>
+        <artifactId>httpcore5-jackson3</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
@@ -137,7 +140,11 @@
         <groupId>org.mockito</groupId>
         <artifactId>mockito-core</artifactId>
         <version>${mockito.version}</version>
-        <scope>test</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.mockito</groupId>
+        <artifactId>mockito-junit-jupiter</artifactId>
+        <version>${mockito.version}</version>
       </dependency>
       <dependency>
         <groupId>org.assertj</groupId>
@@ -173,13 +180,11 @@
         <groupId>org.openjdk.jmh</groupId>
         <artifactId>jmh-core</artifactId>
         <version>${jmh.version}</version>
-        <scope>test</scope>
       </dependency>
       <dependency>
         <groupId>org.openjdk.jmh</groupId>
         <artifactId>jmh-generator-annprocess</artifactId>
         <version>${jmh.version}</version>
-        <scope>test</scope>
       </dependency>
     </dependencies>
   </dependencyManagement>
@@ -187,6 +192,19 @@
   <build>
     <defaultGoal>clean verify</defaultGoal>
     <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <configuration>
+          <source>${maven.compiler.source}</source>
+          <target>${maven.compiler.target}</target>
+          <!-- unset compiler release version set by the apache parent
+           Presently core and client fail compile with java 8 release target
+           due to the use of jdk.net classes
+           -->
+          <release combine.self="override"/>
+        </configuration>
+      </plugin>
       <plugin>
         <artifactId>maven-jar-plugin</artifactId>
         <configuration>
@@ -201,9 +219,10 @@
       <plugin>
         <artifactId>maven-javadoc-plugin</artifactId>
         <configuration>
+          <doclint>all,-missing</doclint>
           <links>
-            <link>${project.url}/httpcore5/apidocs/</link>
-            <link>${project.url}/httpcore5-h2/apidocs/</link>
+            <link>https://hc.apache.org/httpcomponents-core-5.5.x/current/httpcore5/apidocs/</link>
+            <link>https://hc.apache.org/httpcomponents-core-5.5.x/current/httpcore5-h2/apidocs/</link>
           </links>
         </configuration>
       </plugin>
@@ -232,30 +251,8 @@
         </executions>
       </plugin>
       <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-enforcer-plugin</artifactId>
-        <version>3.5.0</version>
-        <executions>
-          <execution>
-            <id>enforce-java-runtime</id>
-            <goals>
-              <goal>enforce</goal>
-            </goals>
-            <configuration>
-              <rules>
-                <requireJavaVersion>
-                  <version>[17,)</version>
-                  <message>Apache HttpComponents Core requires Java 17 or newer to run Maven. Use toolchains to compile and test with older JDKs.</message>
-                </requireJavaVersion>
-              </rules>
-            </configuration>
-          </execution>
-        </executions>
-      </plugin>
-      <plugin>
         <groupId>com.github.siom79.japicmp</groupId>
         <artifactId>japicmp-maven-plugin</artifactId>
-        <version>0.25.4</version>
         <configuration>
           <oldVersion>
             <dependency>
@@ -278,6 +275,7 @@
             <excludes>
               <exclude>@org.apache.hc.core5.annotation.Internal</exclude>
               <exclude>org.apache.hc.core5.testing.reactive.ReactiveTestUtils</exclude>
+              <exclude>org.apache.hc.core5.testing.framework.*</exclude>
             </excludes>
             <skipXmlReport>true</skipXmlReport>
             <skipHtmlReport>false</skipHtmlReport>
@@ -296,7 +294,6 @@
       <plugin>
         <groupId>org.apache.rat</groupId>
         <artifactId>apache-rat-plugin</artifactId>
-        <version>0.18</version>
         <executions>
           <execution>
             <phase>verify</phase>
@@ -320,35 +317,20 @@
 
   <profiles>
     <profile>
-      <id>use-toolchains</id>
+      <!--
+        Jackson 3 is compiled for Java 17, so its class files cannot be read by
+        javac 8 or 11. Builds that select an older toolchain must leave this
+        module out of the reactor by setting -Dhc.jackson3.skip.
+      -->
+      <id>jackson3</id>
       <activation>
-        <file>
-          <exists>${user.home}/.m2/toolchains.xml</exists>
-        </file>
+        <property>
+          <name>!hc.jackson3.skip</name>
+        </property>
       </activation>
-      <build>
-        <plugins>
-          <plugin>
-            <groupId>org.apache.maven.plugins</groupId>
-            <artifactId>maven-toolchains-plugin</artifactId>
-            <version>3.2.0</version>
-            <configuration combine.self="override">
-              <toolchains>
-                <jdk>
-                  <version>${hc.build.toolchain.version}</version>
-                </jdk>
-              </toolchains>
-            </configuration>
-            <executions combine.self="override">
-              <execution>
-                <goals>
-                  <goal>toolchain</goal>
-                </goals>
-              </execution>
-            </executions>
-          </plugin>
-        </plugins>
-      </build>
+      <modules>
+        <module>httpcore5-jackson3</module>
+      </modules>
     </profile>
   </profiles>
 
@@ -377,9 +359,10 @@
         <artifactId>maven-javadoc-plugin</artifactId>
         <configuration>
           <quiet>true</quiet>
+          <doclint>all,-missing</doclint>
           <links>
-            <link>${project.url}/httpcore5/apidocs/</link>
-            <link>${project.url}/httpcore5-h2/apidocs/</link>
+            <link>https://hc.apache.org/httpcomponents-core-5.5.x/current/httpcore5/apidocs/</link>
+            <link>https://hc.apache.org/httpcomponents-core-5.5.x/current/httpcore5-h2/apidocs/</link>
           </links>
           <notimestamp>true</notimestamp>
           <groups>
@@ -440,6 +423,7 @@
             <excludes>
               <exclude>@org.apache.hc.core5.annotation.Internal</exclude>
               <exclude>org.apache.hc.core5.testing.reactive.ReactiveTestUtils</exclude>
+              <exclude>org.apache.hc.core5.testing.framework.*</exclude>
             </excludes>
             <reportOnlyFilename>true</reportOnlyFilename>
           </parameter>

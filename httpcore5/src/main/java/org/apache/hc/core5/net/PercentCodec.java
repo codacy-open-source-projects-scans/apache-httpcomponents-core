@@ -175,6 +175,11 @@ public class PercentCodec {
 
     static void encode(final StringBuilder buf, final CharSequence content, final Charset charset,
                        final BitSet safechars, final boolean blankAsPlus) {
+        encode(buf, content, charset, safechars, blankAsPlus, false);
+    }
+
+    private static void encode(final StringBuilder buf, final CharSequence content, final Charset charset,
+                               final BitSet safechars, final boolean blankAsPlus, final boolean lowerCaseHex) {
         if (content == null) {
             return;
         }
@@ -188,10 +193,10 @@ public class PercentCodec {
                 buf.append("+");
             } else {
                 buf.append("%");
-                final char hex1 = Character.toUpperCase(Character.forDigit((b >> 4) & 0xF, RADIX));
-                final char hex2 = Character.toUpperCase(Character.forDigit(b & 0xF, RADIX));
-                buf.append(hex1);
-                buf.append(hex2);
+                final char hex1 = Character.forDigit((b >> 4) & 0xF, RADIX);
+                final char hex2 = Character.forDigit(b & 0xF, RADIX);
+                buf.append(lowerCaseHex ? hex1 : Character.toUpperCase(hex1));
+                buf.append(lowerCaseHex ? hex2 : Character.toUpperCase(hex2));
             }
         }
     }
@@ -236,7 +241,11 @@ public class PercentCodec {
             } else if (plusAsBlank && c == '+') {
                 bb.put((byte) ' ');
             } else {
-                bb.put((byte) c);
+                if (c > 0x7f) {
+                    bb.put((byte) '?');
+                } else {
+                    bb.put((byte) c);
+                }
             }
         }
         bb.flip();
@@ -252,21 +261,31 @@ public class PercentCodec {
     public static final PercentCodec HTTP_TOKEN = new PercentCodec(HTTP_TOKEN_UNRESERVED);
 
     private final BitSet unreserved;
+    private final boolean lowerCaseHex;
+
+    /**
+     * @since 5.5
+     */
+    @Internal
+    public PercentCodec(final BitSet unreserved, final boolean lowerCaseHex) {
+        this.unreserved = unreserved;
+        this.lowerCaseHex = lowerCaseHex;
+    }
 
     @Internal
     public PercentCodec(final BitSet unreserved) {
-        this.unreserved = unreserved;
+        this(unreserved, false);
     }
 
     public PercentCodec() {
-        this.unreserved = UNRESERVED;
+        this(UNRESERVED, false);
     }
 
     /**
      * @since 5.3
      */
     public void encode(final StringBuilder buf, final CharSequence content) {
-        encode(buf, content, StandardCharsets.UTF_8, unreserved, false);
+        encode(buf, content, StandardCharsets.UTF_8, unreserved, false, lowerCaseHex);
     }
 
     /**
@@ -277,7 +296,7 @@ public class PercentCodec {
             return null;
         }
         final StringBuilder buf = new StringBuilder();
-        encode(buf, content, StandardCharsets.UTF_8, unreserved, false);
+        encode(buf, content, StandardCharsets.UTF_8, unreserved, false, lowerCaseHex);
         return buf.toString();
     }
 

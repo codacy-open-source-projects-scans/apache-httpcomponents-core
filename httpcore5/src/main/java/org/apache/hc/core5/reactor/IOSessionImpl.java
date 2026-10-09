@@ -52,6 +52,16 @@ class IOSessionImpl implements IOSession {
     /** Counts instances created. */
     private final static AtomicLong COUNT = new AtomicLong(0);
 
+    /**
+     * The default buffer size for chunked writes of heap data.
+     * When a heap buffer is written through a socket channel,
+     * the JDK copies its content through a temporary direct buffer of the same size, which is cached per I/O dispatch thread.
+     * Bounding the size of individual write operations also bounds the amount of native memory
+     * that can be consumed by such temporary buffers.
+     * The value is the same as the internal buffer size used by the JDK's built-in HTTP client.
+     */
+    private static final int DEFAULT_BUFSIZE = 16 * 1024;
+
     private final SelectionKey key;
     private final SocketChannel channel;
     private final Deque<Command> commandQueue;
@@ -62,6 +72,7 @@ class IOSessionImpl implements IOSession {
     private final AtomicReference<IOSession.Status> status;
 
     private volatile Timeout socketTimeout;
+    private volatile long initiationTime;
     private volatile long lastReadTime;
     private volatile long lastWriteTime;
     private volatile long lastEventTime;
@@ -78,10 +89,11 @@ class IOSessionImpl implements IOSession {
         this.id = String.format(type + "-%010d", COUNT.getAndIncrement());
         this.handlerRef = new AtomicReference<>();
         this.status = new AtomicReference<>(Status.ACTIVE);
-        final long nowNanos = System.nanoTime();
-        this.lastReadTime = nowNanos;
-        this.lastWriteTime = nowNanos;
-        this.lastEventTime = nowNanos;
+        final long currentTimeMillis = System.currentTimeMillis();
+        this.initiationTime = currentTimeMillis;
+        this.lastReadTime = currentTimeMillis;
+        this.lastWriteTime = currentTimeMillis;
+        this.lastEventTime = currentTimeMillis;
     }
 
     @Override
@@ -211,28 +223,52 @@ class IOSessionImpl implements IOSession {
     @Override
     public void setSocketTimeout(final Timeout timeout) {
         this.socketTimeout = Timeout.defaultsToInfinite(timeout);
-        this.lastEventTime = System.nanoTime();
+        this.lastEventTime = System.currentTimeMillis();
     }
 
     @Override
     public int read(final ByteBuffer dst) throws IOException {
-            return this.channel.read(dst);
+        return this.channel.read(dst);
     }
 
     @Override
     public int write(final ByteBuffer src) throws IOException {
-        return this.channel.write(src);
+        if (src.isDirect() || src.remaining() <= DEFAULT_BUFSIZE) {
+            return this.channel.write(src);
+        }
+        final int limit = src.limit();
+        int totalBytesWritten = 0;
+        do {
+            src.limit(src.position() + Math.min(DEFAULT_BUFSIZE, src.remaining()));
+            final int bytesWritten;
+            try {
+                bytesWritten = this.channel.write(src);
+            } finally {
+                src.limit(limit);
+            }
+            if (bytesWritten > 0) {
+                totalBytesWritten += bytesWritten;
+            } else {
+                break;
+            }
+        } while (src.hasRemaining());
+        return totalBytesWritten;
+    }
+
+    @Override
+    public long getInitiationTime() {
+        return initiationTime;
     }
 
     @Override
     public void updateReadTime() {
-        lastReadTime = System.nanoTime();
+        lastReadTime = System.currentTimeMillis();
         lastEventTime = lastReadTime;
     }
 
     @Override
     public void updateWriteTime() {
-        lastWriteTime = System.nanoTime();
+        lastWriteTime = System.currentTimeMillis();
         lastEventTime = lastWriteTime;
     }
 

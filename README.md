@@ -22,7 +22,7 @@ Apache HttpComponents Core
 Welcome to the HttpCore component of the Apache HttpComponents project.
 
 [![GitHub Actions Status](https://github.com/apache/httpcomponents-core/workflows/Java%20CI/badge.svg)](https://github.com/apache/httpcomponents-core/actions)
-[![Maven Central](https://maven-badges.herokuapp.com/maven-central/org.apache.httpcomponents.core5/httpcore5/badge.svg)](https://maven-badges.herokuapp.com/maven-central/org.apache.httpcomponents.core5/httpcore5)
+[![Maven Central](https://maven-badges.sml.io/maven-central/org.apache.httpcomponents.core5/httpcore5/badge.svg)](https://maven-badges.sml.io/maven-central/org.apache.httpcomponents.core5/httpcore5)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 Building Instructions
@@ -33,7 +33,8 @@ For building from source instructions please refer to [BUILDING.txt](./BUILDING.
 Dependencies
 ------------
 
-HttpCore requires Java 1.8 compatible runtime.
+HttpCore requires Java 1.8 compatible runtime. The optional `httpcore5-jackson3`
+module depends on Jackson 3 and requires Java 17.
 
 Protocol conformance
 --------------------
@@ -45,6 +46,9 @@ Protocol conformance
 - [RFC 1945](https://datatracker.ietf.org/doc/html/rfc1945) - Hypertext Transfer Protocol -- HTTP/1.0
 - [RFC 3986](https://datatracker.ietf.org/doc/html/rfc3986) - Uniform Resource Identifier (URI): Generic Syntax
 - [RFC 9218](https://datatracker.ietf.org/doc/html/rfc9218) - Extensible Prioritization Scheme for HTTP
+- [RFC 10008](https://datatracker.ietf.org/doc/html/rfc10008) - The HTTP QUERY Method
+- [RFC 9651](https://datatracker.ietf.org/doc/html/rfc9651) - Structured Field Values for HTTP
+
 
 Licensing
 ---------

@@ -33,16 +33,14 @@ import org.apache.hc.core5.reactor.ssl.SSLSessionVerifier;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
 
 class ConscryptClientTlsStrategyTest {
 
     @Mock
-    private SSLSessionVerifier sslSessionVerifier;
+    SSLSessionVerifier sslSessionVerifier;
 
     @BeforeEach
     void prepareMocks() {
-        MockitoAnnotations.openMocks(this);
     }
 
     @Test

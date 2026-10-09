@@ -37,12 +37,12 @@ import java.net.StandardSocketOptions;
 import java.net.UnknownHostException;
 import java.nio.channels.CancelledKeyException;
 import java.nio.channels.ClosedChannelException;
+import java.nio.channels.ClosedSelectorException;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
 import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -54,6 +54,7 @@ import org.apache.hc.core5.function.Callback;
 import org.apache.hc.core5.function.Decorator;
 import org.apache.hc.core5.io.CloseMode;
 import org.apache.hc.core5.io.Closer;
+import org.apache.hc.core5.io.IOFunction;
 import org.apache.hc.core5.net.NamedEndpoint;
 import org.apache.hc.core5.util.Args;
 import org.apache.hc.core5.util.ReflectionUtils;
@@ -73,10 +74,10 @@ class SingleCoreIOReactor extends AbstractSingleCoreIOReactor implements Connect
     private final Queue<IOSessionRequest> requestQueue;
     private final AtomicBoolean shutdownInitiated;
     private final long selectTimeoutMillis;
-    private final long selectTimeoutNanos;
-    private volatile long lastTimeoutCheckNanos;
-    private volatile long lastSelectNanos;
+    private volatile long lastTimeoutCheckMillis;
+    private volatile long lastSelectMillis;
     private final IOReactorMetricsListener threadPoolListener;
+    private final IOFunction<SocketAddress, SocketChannel> socketChannelFactory;
 
     // Atomic variables for tracking total wait time and count of processed requests
     private final AtomicLong totalWaitTime = new AtomicLong(0);
@@ -90,6 +91,19 @@ class SingleCoreIOReactor extends AbstractSingleCoreIOReactor implements Connect
             final IOSessionListener sessionListener,
             final IOReactorMetricsListener threadPoolListener,
             final Callback<IOSession> sessionShutdownCallback) {
+        this(exceptionCallback, eventHandlerFactory, reactorConfig, ioSessionDecorator, sessionListener,
+                threadPoolListener, sessionShutdownCallback, null);
+    }
+
+    SingleCoreIOReactor(
+            final Callback<Exception> exceptionCallback,
+            final IOEventHandlerFactory eventHandlerFactory,
+            final IOReactorConfig reactorConfig,
+            final Decorator<IOSession> ioSessionDecorator,
+            final IOSessionListener sessionListener,
+            final IOReactorMetricsListener threadPoolListener,
+            final Callback<IOSession> sessionShutdownCallback,
+            final IOFunction<SocketAddress, SocketChannel> socketChannelFactory) {
         super(exceptionCallback);
         this.eventHandlerFactory = Args.notNull(eventHandlerFactory, "Event handler factory");
         this.reactorConfig = Args.notNull(reactorConfig, "I/O reactor config");
@@ -97,12 +111,12 @@ class SingleCoreIOReactor extends AbstractSingleCoreIOReactor implements Connect
         this.sessionListener = sessionListener;
         this.threadPoolListener = threadPoolListener;
         this.sessionShutdownCallback = sessionShutdownCallback;
+        this.socketChannelFactory = socketChannelFactory != null ? socketChannelFactory : SingleCoreIOReactor::openSocketFor;
         this.shutdownInitiated = new AtomicBoolean();
         this.closedSessions = new ConcurrentLinkedQueue<>();
         this.channelQueue = new ConcurrentLinkedQueue<>();
         this.requestQueue = new ConcurrentLinkedQueue<>();
         this.selectTimeoutMillis = this.reactorConfig.getSelectInterval().toMilliseconds();
-        this.selectTimeoutNanos = TimeUnit.MILLISECONDS.toNanos(this.selectTimeoutMillis);
     }
 
     void enqueueChannel(final ChannelEntry entry) throws IOReactorShutdownException {
@@ -138,7 +152,7 @@ class SingleCoreIOReactor extends AbstractSingleCoreIOReactor implements Connect
             }
 
             // Process selected I/O events
-            lastSelectNanos = System.nanoTime();
+            lastSelectMillis = System.currentTimeMillis();
             if (readyCount > 0) {
                 processEvents(this.selector.selectedKeys());
             }
@@ -179,11 +193,11 @@ class SingleCoreIOReactor extends AbstractSingleCoreIOReactor implements Connect
     }
 
     private void validateActiveChannels() {
-        final long nowNanos = System.nanoTime();
-        if ((nowNanos - this.lastTimeoutCheckNanos) >= this.selectTimeoutNanos) {
-            this.lastTimeoutCheckNanos = nowNanos;
+        final long currentTimeMillis = System.currentTimeMillis();
+        if ((currentTimeMillis - this.lastTimeoutCheckMillis) >= this.selectTimeoutMillis) {
+            this.lastTimeoutCheckMillis = currentTimeMillis;
             for (final SelectionKey key : this.selector.keys()) {
-                checkTimeout(key, nowNanos);
+                checkTimeout(key, currentTimeMillis);
             }
         }
     }
@@ -258,10 +272,10 @@ class SingleCoreIOReactor extends AbstractSingleCoreIOReactor implements Connect
         }
     }
 
-    private void checkTimeout(final SelectionKey key, final long nowNanos) {
+    private void checkTimeout(final SelectionKey key, final long nowMillis) {
         final InternalChannel channel = (InternalChannel) key.attachment();
         if (channel != null) {
-            channel.checkTimeout(nowNanos);
+            channel.checkTimeout(nowMillis);
         }
     }
 
@@ -339,7 +353,7 @@ class SingleCoreIOReactor extends AbstractSingleCoreIOReactor implements Connect
         for (int i = 0; i < MAX_CHANNEL_REQUESTS && (sessionRequest = this.requestQueue.poll()) != null; i++) {
             if (threadPoolListener != null) {
                 // Calculate wait time safely without keeping long-lived state
-                final long waitTimeMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - sessionRequest.getEnqueueNanos());
+                final long waitTimeMillis = System.currentTimeMillis() - sessionRequest.getEnqueueTime();
 
                 // Accumulate total wait time and increment count atomically
                 totalWaitTime.addAndGet(waitTimeMillis);
@@ -349,8 +363,8 @@ class SingleCoreIOReactor extends AbstractSingleCoreIOReactor implements Connect
             if (!sessionRequest.isCancelled()) {
                 final SocketChannel socketChannel;
                 try {
-                    socketChannel = openSocketFor(sessionRequest.remoteAddress);
-                } catch (final IOException ex) {
+                    socketChannel = socketChannelFactory.apply(sessionRequest.remoteAddress);
+                } catch (final IOException | RuntimeException ex) {
                     sessionRequest.failed(ex);
                     return;
                 }
@@ -418,7 +432,13 @@ class SingleCoreIOReactor extends AbstractSingleCoreIOReactor implements Connect
     }
 
     private void closeOpenChannels() {
-        for (final SelectionKey key : selector.keys()) {
+        final Set<SelectionKey> keys;
+        try {
+            keys = selector.keys();
+        } catch (final ClosedSelectorException ignore) {
+            return;
+        }
+        for (final SelectionKey key : keys) {
             final Object attachment = key.attachment();
             if (attachment instanceof InternalChannel) {
                 final InternalChannel channel = (InternalChannel) attachment;
@@ -508,8 +528,8 @@ class SingleCoreIOReactor extends AbstractSingleCoreIOReactor implements Connect
     }
 
     @Override
-    public long lastSelectNano() {
-        return lastSelectNanos;
+    public long lastSelectMilli() {
+        return lastSelectMillis;
     }
 
 }

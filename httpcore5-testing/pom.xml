@@ -28,7 +28,7 @@
   <parent>
     <groupId>org.apache.httpcomponents.core5</groupId>
     <artifactId>httpcore5-parent</artifactId>
-    <version>5.5-alpha2-SNAPSHOT</version>
+    <version>5.5-beta4-SNAPSHOT</version>
   </parent>
   <artifactId>httpcore5-testing</artifactId>
   <name>Apache HttpComponents Core Integration Tests</name>
@@ -131,7 +131,6 @@
           <plugin>
             <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-failsafe-plugin</artifactId>
-            <version>${hc.surefire.version}</version>
             <executions>
               <execution>
                 <goals>

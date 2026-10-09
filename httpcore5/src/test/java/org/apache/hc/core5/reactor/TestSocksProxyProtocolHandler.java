@@ -125,6 +125,7 @@ class TestSocksProxyProtocolHandler {
         private volatile int eventMask;
         private volatile IOEventHandler handler;
         private volatile Timeout socketTimeout;
+        private volatile long initiationTime;
         private volatile long lastReadTime;
         private volatile long lastWriteTime;
         private volatile long lastEventTime;
@@ -136,9 +137,10 @@ class TestSocksProxyProtocolHandler {
             this.open = true;
             this.eventMask = 0;
             this.socketTimeout = Timeout.DISABLED;
-            this.lastReadTime = System.nanoTime();
-            this.lastWriteTime = this.lastReadTime;
-            this.lastEventTime = this.lastReadTime;
+            this.lastReadTime = System.currentTimeMillis();
+            this.lastReadTime = this.initiationTime;
+            this.lastWriteTime = this.initiationTime;
+            this.lastEventTime = this.initiationTime;
         }
 
         CloseMode getLastCloseMode() {
@@ -153,7 +155,7 @@ class TestSocksProxyProtocolHandler {
         @Override
         public void setEventMask(final int ops) {
             this.eventMask = ops;
-            this.lastEventTime = System.nanoTime();
+            this.lastEventTime = System.currentTimeMillis();
         }
 
         @Override
@@ -220,7 +222,12 @@ class TestSocksProxyProtocolHandler {
         @Override
         public void setSocketTimeout(final Timeout timeout) {
             this.socketTimeout = timeout;
-            this.lastEventTime = System.nanoTime();
+            this.lastEventTime = System.currentTimeMillis();
+        }
+
+        @Override
+        public long getInitiationTime() {
+            return this.initiationTime;
         }
 
         @Override
@@ -240,13 +247,13 @@ class TestSocksProxyProtocolHandler {
 
         @Override
         public void updateReadTime() {
-            this.lastReadTime = System.nanoTime();
+            this.lastReadTime = System.currentTimeMillis();
             this.lastEventTime = this.lastReadTime;
         }
 
         @Override
         public void updateWriteTime() {
-            this.lastWriteTime = System.nanoTime();
+            this.lastWriteTime = System.currentTimeMillis();
             this.lastEventTime = this.lastWriteTime;
         }
 
