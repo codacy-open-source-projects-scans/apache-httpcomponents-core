@@ -83,9 +83,26 @@ public abstract class AbstractIOSessionPool<T> implements ModalCloseable {
             Timeout connectTimeout,
             FutureCallback<IOSession> callback);
 
-    protected abstract void validateSession(
-            IOSession ioSession,
-            Callback<Boolean> callback);
+    /**
+     * @deprecated Use {@link #validateSession(Object, IOSession, Callback)}.
+     */
+    @Deprecated
+    protected void validateSession(
+            final IOSession ioSession,
+            final Callback<Boolean> callback) {
+        callback.execute(Boolean.TRUE);
+    }
+
+    /**
+     * @since 5.5
+     */
+    @SuppressWarnings("deprecation")
+    protected void validateSession(
+            final T endpoint,
+            final IOSession ioSession,
+            final Callback<Boolean> callback) {
+        validateSession(ioSession, callback);
+    }
 
     protected abstract void closeSession(
             IOSession ioSession,
@@ -177,14 +194,19 @@ public abstract class AbstractIOSessionPool<T> implements ModalCloseable {
 
             @Override
             public void completed(final IOSession ioSession) {
-                validateSession(ioSession, result -> {
-                    if (result) {
-                        future.completed(ioSession);
-                    } else {
-                        getSessionInternal(poolEntry, true, endpoint, connectTimeout,
+                if (isIdle(ioSession) && isExpired(endpoint, ioSession)) {
+                    getSessionInternal(poolEntry, true, endpoint, connectTimeout,
                             new CompletingFutureContribution<>(future));
-                    }
-                });
+                } else {
+                    validateSession(endpoint, ioSession, result -> {
+                        if (result) {
+                            future.completed(ioSession);
+                        } else {
+                            getSessionInternal(poolEntry, true, endpoint, connectTimeout,
+                                    new CompletingFutureContribution<>(future));
+                        }
+                    });
+                }
             }
 
             @Override

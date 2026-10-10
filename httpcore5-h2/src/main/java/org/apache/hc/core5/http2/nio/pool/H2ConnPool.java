@@ -151,6 +151,7 @@ public final class H2ConnPool extends AbstractIOSessionPool<HttpHost> {
 
     @Override
     protected void validateSession(
+            final HttpHost namedEndpoint,
             final IOSession ioSession,
             final Callback<Boolean> callback) {
         if (ioSession.isOpen()) {

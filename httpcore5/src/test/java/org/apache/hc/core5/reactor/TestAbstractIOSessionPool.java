@@ -96,10 +96,13 @@ class TestAbstractIOSessionPool {
                 ArgumentMatchers.any())).thenReturn(connectFuture);
 
         Mockito.doAnswer(invocation -> {
-            final Callback<Boolean> callback = invocation.getArgument(1);
+            final Callback<Boolean> callback = invocation.getArgument(2);
             callback.execute(true);
             return null;
-        }).when(impl).validateSession(ArgumentMatchers.any(), ArgumentMatchers.any());
+        }).when(impl).validateSession(
+                ArgumentMatchers.eq("somehost"),
+                ArgumentMatchers.any(),
+                ArgumentMatchers.any());
 
         Mockito.when(ioSession1.isOpen()).thenReturn(true);
 
@@ -132,7 +135,10 @@ class TestAbstractIOSessionPool {
         Assertions.assertTrue(future2.isDone());
         Assertions.assertSame(ioSession1, future2.get());
 
-        Mockito.verify(impl, Mockito.times(2)).validateSession(ArgumentMatchers.any(), ArgumentMatchers.any());
+        Mockito.verify(impl, Mockito.times(2)).validateSession(
+                ArgumentMatchers.eq("somehost"),
+                ArgumentMatchers.any(),
+                ArgumentMatchers.any());
 
         final Future<IOSession> future3 = impl.getSession("somehost", Timeout.ofSeconds(123L), null);
 
@@ -141,7 +147,10 @@ class TestAbstractIOSessionPool {
                 ArgumentMatchers.any(),
                 ArgumentMatchers.any());
 
-        Mockito.verify(impl, Mockito.times(3)).validateSession(ArgumentMatchers.any(), ArgumentMatchers.any());
+        Mockito.verify(impl, Mockito.times(3)).validateSession(
+                ArgumentMatchers.eq("somehost"),
+                ArgumentMatchers.any(),
+                ArgumentMatchers.any());
 
         Assertions.assertTrue(future3.isDone());
         Assertions.assertSame(ioSession1, future3.get());
@@ -250,10 +259,31 @@ class TestAbstractIOSessionPool {
 
         Mockito.when(ioSession1.isOpen()).thenReturn(true);
         Mockito.doAnswer(invocation -> {
-            final Callback<Boolean> callback = invocation.getArgument(1);
+            final Callback<Boolean> callback = invocation.getArgument(2);
             callback.execute(false);
             return null;
-        }).when(impl).validateSession(ArgumentMatchers.any(), ArgumentMatchers.any());
+        }).when(impl).validateSession(
+                ArgumentMatchers.eq("somehost"),
+                ArgumentMatchers.any(),
+                ArgumentMatchers.any());
+
+        impl.getSession("somehost", Timeout.ofSeconds(123L), null);
+
+        Mockito.verify(impl, Mockito.times(1)).connectSession(
+                ArgumentMatchers.eq("somehost"),
+                ArgumentMatchers.eq(Timeout.ofSeconds(123L)),
+                ArgumentMatchers.any());
+    }
+
+    @Test
+    void testGetSessionReconnectIfExpired() {
+        final AbstractIOSessionPool.PoolEntry entry1 = impl.getPoolEntry("somehost");
+        Assertions.assertNotNull(entry1);
+        entry1.session = ioSession1;
+
+        Mockito.when(ioSession1.isOpen()).thenReturn(true);
+        Mockito.when(impl.isIdle(ioSession1)).thenReturn(true);
+        Mockito.when(impl.isExpired("somehost", ioSession1)).thenReturn(true);
 
         impl.getSession("somehost", Timeout.ofSeconds(123L), null);
 
